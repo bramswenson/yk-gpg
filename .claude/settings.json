@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo *)",
+      "Bash(gh *)",
+      "Bash(git *)",
+      "Bash(hk *)",
+      "Read(//home/bram/.cargo/registry/src/**)"
+    ]
+  },
+  "enabledPlugins": {
+    "rust-analyzer-lsp@claude-plugins-official": true
+  }
+}

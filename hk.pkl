@@ -1,0 +1,31 @@
+amends "package://github.com/jdx/hk/releases/download/v1.36.0/hk@1.36.0#/Config.pkl"
+
+hooks {
+  ["pre-commit"] {
+    steps {
+      ["cargo-fmt"] {
+        glob = "*.rs"
+        workspace_indicator = "Cargo.toml"
+        fix = "cargo fmt --manifest-path {{workspace_indicator}}"
+        check = "cargo fmt --manifest-path {{workspace_indicator}} --check"
+      }
+      ["cargo-clippy"] {
+        glob = "*.rs"
+        workspace_indicator = "Cargo.toml"
+        check = "cargo clippy --manifest-path {{workspace_indicator}} -- -D warnings"
+      }
+    }
+  }
+  ["pre-push"] {
+    steps {
+      ["cargo-test"] {
+        workspace_indicator = "Cargo.toml"
+        check = "cargo nextest run --manifest-path {{workspace_indicator}}"
+      }
+      ["cargo-deny"] {
+        workspace_indicator = "Cargo.toml"
+        check = "cargo deny --manifest-path {{workspace_indicator}} check"
+      }
+    }
+  }
+}
