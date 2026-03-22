@@ -1,0 +1,79 @@
+---
+source: crates/kdub/tests/cli.rs
+expression: stdout
+---
+Cross-platform OpenPGP key lifecycle management with smart card support.
+
+kdub creates and manages OpenPGP keys, provisions them to YubiKey or other OpenPGP smart cards, and handles the full key lifecycle — backup, renewal, rotation, and publishing.
+
+Based on drduh/YubiKey-Guide. Designed for use with Tails OS on an air-gapped machine for maximum security.
+
+Usage: kdub [OPTIONS] <COMMAND>
+
+Commands:
+  init         Initialize directories and configuration
+  doctor       Check system dependencies
+  version      Print version information
+  completions  Generate shell completions
+  key          Key management operations
+  card         Smart card operations
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --batch
+          Non-interactive mode; fail instead of prompting. Also enabled by: BATCH_MODE=true or CI=true
+
+  -v, --verbose...
+          Verbose output (repeat for debug: -vv)
+
+  -q, --quiet
+          Suppress informational output
+
+      --config <CONFIG>
+          Config file path
+
+      --data-dir <DATA_DIR>
+          Data directory (identities, backups)
+          
+          [env: KDUB_DATA_DIR=]
+
+      --no-color
+          Disable colored output
+          
+          [env: NO_COLOR=]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Quick start:
+  kdub init                              Set up directories and config
+  kdub doctor                            Verify system readiness
+  kdub key create "Name <email>"         Create an OpenPGP identity
+  kdub key backup 0xKEYID                Back up keys (do this BEFORE provisioning)
+  kdub card setup                        Configure smart card PINs
+  kdub card provision 0xKEYID            Move keys to smart card
+
+Key lifecycle:
+  kdub key renew "Name"                  Extend subkey expiration
+  kdub key rotate "Name" --revoke-old    Rotate to new subkeys
+  kdub key publish 0xKEYID --keyserver   Publish to keys.openpgp.org
+  kdub key publish 0xKEYID --github      Upload to GitHub
+
+Recommended setup:
+  For key generation and smart card provisioning, use Tails OS on an
+  air-gapped machine with an encrypted USB for long-term backup:
+
+    1. Download and verify Tails:  https://tails.net/install/
+    2. Boot Tails, set up encrypted persistent storage
+    3. Download kdub into persistent storage
+    4. Disable networking → create keys → provision to YubiKey
+    5. Store the Tails USB as your encrypted offline backup
+
+  Automated Tails setup is planned: https://github.com/bramswenson/kdub/issues/3
+
+More info:
+  https://github.com/bramswenson/kdub
+  https://github.com/drduh/YubiKey-Guide

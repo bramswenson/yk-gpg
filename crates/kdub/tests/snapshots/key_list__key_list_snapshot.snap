@@ -1,0 +1,10 @@
+---
+source: crates/kdub/tests/key_list.rs
+expression: redacted
+---
+Managed identities:
+
+  Snapshot User <snapshot@example.com>
+    Fingerprint: <FINGERPRINT>
+    Key type:    ed25519
+    Created:     <DATE>

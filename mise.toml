@@ -1,9 +1,0 @@
-[settings]
-experimental = true
-env_shell_expand = true
-
-[env]
-YK_GPG_SRC_DIR = "{{ config_root }}/src"
-
-[tools]
-"aqua:bats-core/bats-core" = "latest"

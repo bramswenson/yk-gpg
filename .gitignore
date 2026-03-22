@@ -1,3 +1,2 @@
 mise.local.toml
-.bats-*
-test/tmp/
+/target/
