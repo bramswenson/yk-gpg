@@ -3,6 +3,7 @@ mod commands;
 // Used by command implementations in later phases.
 #[allow(dead_code)]
 mod secret_input;
+mod updater;
 
 use std::process::ExitCode;
 use std::sync::Arc;

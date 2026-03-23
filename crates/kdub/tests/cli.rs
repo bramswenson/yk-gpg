@@ -16,7 +16,8 @@ fn help_shows_all_commands() {
         .stdout(predicate::str::contains("version"))
         .stdout(predicate::str::contains("completions"))
         .stdout(predicate::str::contains("key"))
-        .stdout(predicate::str::contains("card"));
+        .stdout(predicate::str::contains("card"))
+        .stdout(predicate::str::contains("update"));
 }
 
 #[test]

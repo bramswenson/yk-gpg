@@ -229,6 +229,45 @@ kdub 0.1.0 (abc1234 2026-03-15)
 
 ---
 
+### `kdub update`
+
+Check for and install kdub updates. Downloads the latest release from GitHub,
+verifies its zipsign ed25519ph signature against the embedded public key, and
+replaces the current binary.
+
+```
+kdub update [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--check` | Only check for updates, don't install |
+| `-y, --yes` | Skip confirmation prompt |
+
+```bash
+# Check if a newer version is available
+kdub update --check
+
+# Update with confirmation prompt
+kdub update
+
+# Update non-interactively (CI/scripts)
+kdub update --yes
+```
+
+A passive version check runs after every successful command (except `update`
+itself) and prints a notice to stderr when a newer version exists. The check
+hits the GitHub Releases API at most once every 24 hours (cached in
+`~/.cache/kdub/update-check.json`). Suppress it with:
+
+```bash
+KDUB_NO_UPDATE_CHECK=1 kdub doctor    # env var
+kdub --quiet doctor                   # quiet flag
+kdub doctor 2>/dev/null               # redirect stderr
+```
+
+---
+
 ### `kdub completions`
 
 Generate shell completions.
@@ -819,6 +858,7 @@ Environment variables use the `KDUB_*` prefix:
 | `KDUB_PASSPHRASE` | `--passphrase` | Certify key passphrase (preferred over CLI flag in CI) |
 | `KDUB_ADMIN_PIN` | `--admin-pin` | Card admin PIN (preferred over CLI flag in CI) |
 | `KDUB_USER_PIN` | `--new-user-pin` | Card user PIN (preferred over CLI flag in CI) |
+| `KDUB_NO_UPDATE_CHECK` | — | Set to `1` to disable passive version check notice |
 | `BATCH_MODE` | `--batch` | Non-interactive mode |
 | `CI` | `--batch` | Also enables batch mode |
 | `NO_COLOR` | `--no-color` | Disable colored output |
@@ -1011,6 +1051,23 @@ cargo release major    # 0.1.0 → 1.0.0  (breaking changes)
 This automatically: bumps version in all Cargo.toml files → generates CHANGELOG.md → commits → tags → pushes. The tag push triggers the release CI workflow which builds binaries and creates a GitHub Release.
 
 For a dry run: `cargo release patch --dry-run`
+
+### Release signing
+
+Releases are signed with [zipsign](https://github.com/nicholasbishop/zipsign) (ed25519ph). The public key is embedded in the binary at `crates/kdub/zipsign-public.key`; the private key is stored as a GitHub Actions secret.
+
+```bash
+# First-time setup (or key rotation):
+mise run zipsign:setup
+```
+
+This generates a keypair, uploads the private key to GitHub Actions via `gh secret set`, securely deletes the local copy, and leaves the public key for you to commit.
+
+Each release produces: 4 bare binaries + 4 signed `.tar.gz` archives + `SHA256SUMS`. Verify a release locally:
+
+```bash
+zipsign verify tar kdub-v0.1.0-x86_64-unknown-linux-gnu.tar.gz crates/kdub/zipsign-public.key
+```
 
 ## License
 

@@ -46,7 +46,10 @@ hooks {
                 check = "cargo deny --manifest-path {{workspace_indicator}} check"
             }
             ["zizmor"] = Builtins.zizmor
-            ["pinact"] = Builtins.pinact
+            ["pinact"] {
+                glob = ".github/workflows/* */action.*"
+                check = "GITHUB_TOKEN=$(gh auth token) pinact run --verify --check {{ files }}"
+            }
         }
     }
     ["fix"] {

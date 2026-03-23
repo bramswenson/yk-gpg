@@ -99,6 +99,8 @@ pub enum Command {
         #[command(subcommand)]
         cmd: CardCommand,
     },
+    /// Check for and install kdub updates
+    Update(UpdateArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -434,4 +436,20 @@ impl TouchPolicy {
     pub fn is_irreversible(&self) -> bool {
         matches!(self, TouchPolicy::Fixed | TouchPolicy::CachedFixed)
     }
+}
+
+// ---------------------------------------------------------------------------
+// update
+// ---------------------------------------------------------------------------
+
+/// Arguments for the `kdub update` subcommand.
+#[derive(Args)]
+pub struct UpdateArgs {
+    /// Only check for updates, don't install
+    #[arg(long)]
+    pub check: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }

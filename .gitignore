@@ -2,3 +2,4 @@ mise.local.toml
 /target/
 .claude/settings.local.json
 20??-??-??-*.txt
+/zipsign-private.key

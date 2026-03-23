@@ -26,6 +26,12 @@ cargo audit                              # security audit
 cargo llvm-cov nextest --html            # coverage report
 ```
 
+## Mise Tasks
+
+```bash
+mise run zipsign:setup    # generate signing keypair, upload to GH Actions, delete local private key
+```
+
 ## Dependencies of Note
 
 - `pgp` (rPGP) — OpenPGP implementation. Use version 0.19+, not 0.14.
@@ -36,6 +42,9 @@ cargo llvm-cov nextest --html            # coverage report
 - `serde` / `toml` — config file parsing.
 - `tracing` — structured logging.
 - `dialoguer` — interactive prompts (move `String` into `SecretString` immediately after capture).
+- `self_update` — binary self-update from GitHub Releases. Use `ureq` backend (no tokio). CLI crate only.
+- `semver` — version comparison for update checks.
+- `zipsign` — ed25519ph release signing. Public key embedded via `include_bytes!`.
 - `insta` — snapshot testing.
 - `rstest` — parameterized tests.
 - `mockall` — trait mocking.

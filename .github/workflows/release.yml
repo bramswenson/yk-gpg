@@ -7,8 +7,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-permissions:
-  contents: write  # needed for creating releases
+permissions: {}
 
 jobs:
   build:
@@ -19,27 +18,21 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            binary: kdub
             asset: kdub-linux-amd64
-            use_cross: false
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            binary: kdub
+            os: ubuntu-24.04-arm
             asset: kdub-linux-arm64
-            use_cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
-            binary: kdub
             asset: kdub-macos-amd64
-            use_cross: false
           - target: aarch64-apple-darwin
             os: macos-latest
-            binary: kdub
             asset: kdub-macos-arm64
-            use_cross: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -47,48 +40,73 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpcsclite-dev
 
-      - name: Install cross
-        if: matrix.use_cross
-        run: cargo install cross --locked
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Build release binary (native)
-        if: "!matrix.use_cross"
+      - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build release binary (cross)
-        if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }}
+      - name: Rename bare binary
+        run: cp target/${{ matrix.target }}/release/kdub ${{ matrix.asset }}
 
-      - name: Rename binary
-        run: cp target/${{ matrix.target }}/release/${{ matrix.binary }} ${{ matrix.asset }}
+      - name: Package archive
+        run: |
+          tar czf kdub-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/release kdub
+
+      - name: Install zipsign
+        run: cargo install zipsign --version 0.2.1 --locked
+
+      - name: Sign archive
+        env:
+          ZIPSIGN_PRIVATE_KEY: ${{ secrets.ZIPSIGN_PRIVATE_KEY }}
+        run: |
+          if [ -d /dev/shm ]; then
+            KEYFILE=$(mktemp /dev/shm/zipsign-XXXXXX.key)
+          else
+            KEYFILE=$(mktemp)
+          fi
+          chmod 600 "$KEYFILE"
+          trap 'shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"' EXIT
+          echo "$ZIPSIGN_PRIVATE_KEY" | base64 -d > "$KEYFILE"
+          zipsign sign tar kdub-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz "$KEYFILE"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: release-${{ matrix.target }}
+          path: |
+            ${{ matrix.asset }}
+            kdub-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
 
   release:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed for creating releases
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           merge-multiple: true
 
+      - name: Generate checksums
+        run: sha256sum kdub-* > SHA256SUMS
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
           files: |
             kdub-linux-amd64
             kdub-linux-arm64
             kdub-macos-amd64
             kdub-macos-arm64
+            kdub-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+            kdub-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz
+            kdub-${{ github.ref_name }}-x86_64-apple-darwin.tar.gz
+            kdub-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
+            SHA256SUMS
           generate_release_notes: true

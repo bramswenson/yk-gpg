@@ -1,8 +1,16 @@
+# Slow tests: key generation is CPU-bound (~5s Ed25519, ~90s RSA4096).
+# Excluded from default and ci profiles; run separately via the slow profile.
+# Update this list when adding new key-generation tests.
+[test-groups.slow-tests]
+max-threads = 1
+
 [profile.default]
 # Fail fast on first failure
 fail-fast = true
 # Slow test threshold — flag tests exceeding this
 slow-timeout = { period = "30s", terminate-after = 3 }
+# Exclude slow key-generation tests from local runs and pre-push hooks
+default-filter = "not test(test_generate_rsa4096_key) and not test(test_key_create_with_env_key_type)"
 
 [profile.default.junit]
 path = "target/nextest/default/junit.xml"
@@ -12,6 +20,28 @@ fail-fast = false
 # CI runners typically have 4 cores — use them all
 test-threads = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 4 }
+# Same exclusion as default — slow tests run in a dedicated CI job
+default-filter = "not test(test_generate_rsa4096_key) and not test(test_key_create_with_env_key_type)"
 
 [profile.ci.junit]
 path = "target/nextest/ci/junit.xml"
+
+# Profile for slow tests only — used locally
+[profile.slow]
+fail-fast = true
+test-threads = 1
+slow-timeout = { period = "120s", terminate-after = 2 }
+default-filter = "test(test_generate_rsa4096_key) or test(test_key_create_with_env_key_type)"
+
+[profile.slow.junit]
+path = "target/nextest/slow/junit.xml"
+
+# Profile for slow tests in CI — same filter as slow, with CI settings
+[profile.ci-slow]
+fail-fast = false
+test-threads = 1
+slow-timeout = { period = "120s", terminate-after = 2 }
+default-filter = "test(test_generate_rsa4096_key) or test(test_key_create_with_env_key_type)"
+
+[profile.ci-slow.junit]
+path = "target/nextest/ci-slow/junit.xml"

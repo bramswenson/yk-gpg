@@ -5,4 +5,65 @@ pinact = "3.9.0"
 pkl = "0.31.0"
 taplo = "0.10.0"
 typos = "1.44.0"
+zipsign = "0.2.1"
 zizmor = "1.23.1"
+
+[tasks."zipsign:setup"]
+description = "Generate zipsign keypair, upload private key to GitHub Actions, then delete it"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+PRIVATE_KEY="zipsign-private.key"
+PUBLIC_KEY="crates/kdub/zipsign-public.key"
+
+echo "Generating zipsign keypair..."
+zipsign gen-key "$PRIVATE_KEY" "$PUBLIC_KEY"
+
+# Verify public key is exactly 32 bytes
+PUB_SIZE=$(wc -c < "$PUBLIC_KEY")
+if [ "$PUB_SIZE" -ne 32 ]; then
+  echo "ERROR: Public key is $PUB_SIZE bytes, expected 32." >&2
+  rm -f "$PRIVATE_KEY"
+  exit 1
+fi
+echo "Public key verified: 32 bytes."
+
+echo "Uploading private key to GitHub Actions secret ZIPSIGN_PRIVATE_KEY..."
+base64 < "$PRIVATE_KEY" | tr -d '\\n' | gh secret set ZIPSIGN_PRIVATE_KEY
+echo "Secret uploaded."
+
+echo "Securely deleting private key..."
+if command -v shred >/dev/null 2>&1; then
+  shred -u "$PRIVATE_KEY"
+else
+  dd if=/dev/urandom of="$PRIVATE_KEY" bs=1 count=32 conv=notrunc 2>/dev/null
+  rm -f "$PRIVATE_KEY"
+fi
+echo "Private key deleted."
+
+echo ""
+echo "DONE. Remember to commit the public key:"
+echo "  git add $PUBLIC_KEY && git commit -m 'chore: add zipsign public key'"
+"""
+
+[tasks."actions:pin"]
+description = "Pin all GitHub Actions to latest SHA hashes and verify with zizmor"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Pinning GitHub Actions to latest SHA hashes..."
+pinact run
+
+echo ""
+echo "Verifying with zizmor..."
+if zizmor .github/workflows/; then
+  echo "All checks passed."
+else
+  echo ""
+  echo "zizmor found issues. Review output above."
+  echo "Update .github/zizmor.yml if new suppressions are needed."
+  exit 1
+fi
+"""

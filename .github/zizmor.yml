@@ -1,0 +1,33 @@
+# dtolnay/rust-toolchain@stable is intentionally branch-based —
+# it tracks the latest stable Rust toolchain. Pinning to a SHA
+# would defeat its purpose.
+rules:
+  unpinned-uses:
+    ignore:
+      - ci.yml:30
+      - ci.yml:67
+      - ci.yml:88
+      - coverage.yml:29
+      - release.yml:43
+  # Swatinem/rust-cache in tag/push-triggered workflows is an
+  # accepted trade-off for this project's threat model.
+  cache-poisoning:
+    ignore:
+      - ci.yml
+      - release.yml
+  # GitHub environments are not configured for this project.
+  # Secrets are scoped to the repo level, which is standard
+  # for open-source projects at this scale.
+  secrets-outside-env:
+    ignore:
+      - coverage.yml
+      - release.yml
+  # dtolnay/rust-toolchain provides target installation and
+  # component management that raw rustup commands don't match
+  # as cleanly. softprops/action-gh-release handles release
+  # asset uploading more robustly than gh release create.
+  superfluous-actions:
+    ignore:
+      - ci.yml
+      - coverage.yml
+      - release.yml

@@ -3,6 +3,7 @@ mod completions;
 mod doctor;
 mod init;
 mod key;
+mod update;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,9 +23,18 @@ pub fn dispatch(cli: Cli, shutdown: &Arc<AtomicBool>) -> eyre::Result<ExitCode> 
         return Ok(ExitCode::from(6));
     }
 
+    // Update command has a different error type (eyre, not KdubError)
+    // because all update logic is CLI-only and does not use kdub-lib errors.
+    if let Command::Update(ref args) = cli.command {
+        return match update::run(args, &cli.global) {
+            Ok(()) => Ok(ExitCode::SUCCESS),
+            Err(e) => Err(e),
+        };
+    }
+
     let result = match cli.command {
-        Command::Init(args) => init::run(&args, &cli.global),
-        Command::Doctor(args) => doctor::run(&args, &cli.global),
+        Command::Init(ref args) => init::run(args, &cli.global),
+        Command::Doctor(ref args) => doctor::run(args, &cli.global),
         Command::Version => {
             let version = env!("CARGO_PKG_VERSION");
             let git_sha = option_env!("VERGEN_GIT_SHA").unwrap_or("unknown");
@@ -40,18 +50,27 @@ pub fn dispatch(cli: Cli, shutdown: &Arc<AtomicBool>) -> eyre::Result<ExitCode> 
             println!("  target: {target}");
             Ok(())
         }
-        Command::Completions(args) => completions::run(&args),
-        Command::Key { cmd } => key::run(&cmd, &cli.global),
-        Command::Card { cmd } => card::run(&cmd, &cli.global),
+        Command::Completions(ref args) => completions::run(args),
+        Command::Key { ref cmd } => key::run(cmd, &cli.global),
+        Command::Card { ref cmd } => card::run(cmd, &cli.global),
+        Command::Update(_) => unreachable!(),
     };
 
-    match result {
-        Ok(()) => Ok(ExitCode::SUCCESS),
+    let is_ok = result.is_ok();
+    let exit = match result {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
-            Ok(ExitCode::from(e.exit_code() as u8))
+            ExitCode::from(e.exit_code() as u8)
         }
+    };
+
+    // Print update notice on success only, and not after `kdub update` itself
+    if is_ok && !cli.global.quiet && !matches!(cli.command, Command::Update(_)) {
+        crate::updater::maybe_print_update_notice();
     }
+
+    Ok(exit)
 }
 
 /// Resolve the data directory path.

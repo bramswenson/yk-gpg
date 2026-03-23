@@ -18,10 +18,10 @@ hex = { version = "0.4", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 pgp = "0.19"
 rand = "0.8"
-toml = "0.8"
-directories = "5"
+toml = "1"
+directories = "6"
 tempfile = "3"
-rstest = "0.24"
+rstest = "0.26"
 ureq = { version = "3", features = ["socks-proxy"] }
 urlencoding = "2"
 sha1 = "0.10"

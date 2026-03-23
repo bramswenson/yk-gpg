@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/suzuki-shunsuke/pinact/refs/heads/main/json-schema/pinact.json
+# pinact - https://github.com/suzuki-shunsuke/pinact
+version: 3
+
+ignore_actions:
+  # dtolnay/rust-toolchain uses branch refs (stable, nightly, 1.80)
+  # that intentionally track the latest release. Pinning to a SHA
+  # would defeat this and require manual updates on every Rust release.
+  - name: dtolnay/rust-toolchain
+    ref: stable

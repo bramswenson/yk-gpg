@@ -3,12 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,17 +20,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install cargo tools
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@06203676c62f0d3c765be3f2fcfbebbcb02d09f5 # v2.69.6
         with:
           tool: cargo-nextest,cargo-deny,cargo-audit
 
@@ -46,7 +49,7 @@ jobs:
         run: cargo audit
 
       - name: Tests
-        run: cargo nextest run --run-ignored all --profile ci -E 'not test(test_generate_rsa4096_key)'
+        run: cargo nextest run --profile ci
 
   test-linux-slow:
     name: Slow tests (ubuntu)
@@ -54,38 +57,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@06203676c62f0d3c765be3f2fcfbebbcb02d09f5 # v2.69.6
         with:
           tool: cargo-nextest
 
       - name: Slow tests
-        run: cargo nextest run --run-ignored all --profile ci -E 'test(test_generate_rsa4096_key)'
+        run: cargo nextest run --profile ci-slow
 
   test-macos:
     name: Test (macOS)
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@06203676c62f0d3c765be3f2fcfbebbcb02d09f5 # v2.69.6
         with:
           tool: cargo-nextest
 
       - name: Tests
-        run: cargo nextest run --run-ignored all --profile ci -E 'not test(test_generate_rsa4096_key)'
+        run: cargo nextest run --profile ci
