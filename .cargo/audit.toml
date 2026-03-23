@@ -1,0 +1,5 @@
+[advisories]
+ignore = [
+  # rsa timing sidechannel; no fix available upstream (pgp crate pins rsa 0.9)
+  "RUSTSEC-2023-0071",
+]

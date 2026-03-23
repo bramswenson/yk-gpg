@@ -1,0 +1,32 @@
+[advisories]
+version = 2
+# RUSTSEC-2023-0071: Marvin Attack timing sidechannel in `rsa` crate (transitive dep of pgp 0.19).
+# No fix available upstream. kdub primarily uses Ed25519 (not RSA) for new keys.
+# RSA4096 support is for YubiKey 4 backward compatibility only.
+ignore = ["RUSTSEC-2023-0071"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+  "Unicode-DFS-2016",
+  "OpenSSL",
+  "bzip2-1.0.6",
+  "CDLA-Permissive-2.0",
+]

@@ -1,0 +1,17 @@
+[profile.default]
+# Fail fast on first failure
+fail-fast = true
+# Slow test threshold — flag tests exceeding this
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[profile.default.junit]
+path = "target/nextest/default/junit.xml"
+
+[profile.ci]
+fail-fast = false
+# CI runners typically have 4 cores — use them all
+test-threads = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[profile.ci.junit]
+path = "target/nextest/ci/junit.xml"

@@ -1,0 +1,12 @@
+# typos configuration for kdub
+[default.extend-words]
+# GPG colon-delimited record type for fingerprint lines
+fpr = "fpr"
+
+[files]
+extend-exclude = [
+  "crates/kdub/tests/fixtures/",
+  "crates/kdub-lib/tests/fixtures/",
+  "src/",
+  "test/",
+]

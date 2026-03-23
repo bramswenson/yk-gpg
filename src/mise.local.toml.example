@@ -1,7 +1,0 @@
-# Copy this file to mise.local.toml and customize.
-# mise.local.toml is gitignored and overrides mise.toml values.
-[env]
-# YK_GPG_IDENTITY = "Your Name <you@example.com>"
-# YK_GPG_KEY_TYPE = "rsa4096"
-# YK_GPG_EXPIRATION = "1y"
-# YK_GPG_TOR_PROXY = "socks5h://127.0.0.1:9050"

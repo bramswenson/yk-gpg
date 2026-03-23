@@ -1,5 +1,0 @@
-source-path=SCRIPTDIR
-source-path=SCRIPTDIR/..
-source-path=SCRIPTDIR/../lib
-external-sources=true
-shell=bash

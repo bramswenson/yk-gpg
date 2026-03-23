@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-#MISE description="Run bats unit tests"
-set -euo pipefail
-
-PROJECT_ROOT="${MISE_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-
-echo "Running unit tests..."
-bats "${PROJECT_ROOT}/test/unit/"

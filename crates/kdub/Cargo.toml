@@ -1,0 +1,36 @@
+[package]
+name = "kdub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kdub-lib = { path = "../kdub-lib", version = "0.1.0" }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+color-eyre = "0.6"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+signal-hook = "0.3"
+dialoguer = "0.11"
+console = "0.15"
+chrono.workspace = true
+rand.workspace = true
+secrecy.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+vergen-gitcl = { version = "1" }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+insta = "1"
+regex = "1"
+tempfile.workspace = true
+serde_json.workspace = true
+trycmd = "0.15"
+rstest = { workspace = true }

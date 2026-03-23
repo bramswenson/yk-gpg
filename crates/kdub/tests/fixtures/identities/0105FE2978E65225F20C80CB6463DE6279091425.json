@@ -1,0 +1,11 @@
+{
+  "identity": "Test Fixture <fixture@test.example>",
+  "fingerprint": "0105FE2978E65225F20C80CB6463DE6279091425",
+  "key_type": "ed25519",
+  "created": "2026-03-22T22:49:35.900082596Z",
+  "backed_up": null,
+  "renewed": null,
+  "rotated": null,
+  "card_serial": null,
+  "provisioned": null
+}

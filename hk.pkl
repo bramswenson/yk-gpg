@@ -1,0 +1,59 @@
+amends "package://github.com/jdx/hk/releases/download/v1.39.0/hk@1.39.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.39.0/hk@1.39.0#/Builtins.pkl"
+
+local linters = new Mapping<String, Step> {
+    // Rust — fixers
+    ["cargo-fmt"] = Builtins.cargo_fmt
+    ["taplo-format"] = Builtins.taplo_format
+
+    // Rust — checkers
+    ["cargo-clippy"] = Builtins.cargo_clippy
+
+    // Security
+    ["detect-private-key"] = Builtins.detect_private_key
+    ["gitleaks"] {
+        glob = "*"
+        check = "gitleaks protect --staged --no-banner"
+    }
+    ["no-commit-to-branch"] = Builtins.no_commit_to_branch
+
+    // Quality
+    ["typos"] = Builtins.typos
+    ["check-merge-conflict"] = Builtins.check_merge_conflict
+    ["check-added-large-files"] = Builtins.check_added_large_files
+
+    // Catch leftover debug macros
+    ["dbg"] {
+        glob = "**/*.rs"
+        check = "! grep -n 'dbg!' {{ files }}"
+    }
+}
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = linters
+    }
+    ["pre-push"] {
+        steps {
+            ["cargo-test"] {
+                workspace_indicator = "Cargo.toml"
+                check = "cargo nextest run --manifest-path {{workspace_indicator}}"
+            }
+            ["cargo-deny"] {
+                workspace_indicator = "Cargo.toml"
+                check = "cargo deny --manifest-path {{workspace_indicator}} check"
+            }
+            ["zizmor"] = Builtins.zizmor
+            ["pinact"] = Builtins.pinact
+        }
+    }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+    ["check"] {
+        steps = linters
+    }
+}

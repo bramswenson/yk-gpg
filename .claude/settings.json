@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo *)",
+      "Bash(cargo check *)",
+      "Bash(cargo update *)",
+      "Bash(cargo tree *)",
+      "Bash(cargo run *)",
+      "Bash(cargo nextest *)",
+      "Bash(rustc *)",
+      "Bash(hk *)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:*.gnupg.org)",
+      "WebFetch(domain:gnupg.org)",
+      "WebFetch(domain:*.yubico.com)",
+      "WebFetch(domain:yubico.com)",
+      "WebFetch(domain:hk.jdx.dev)",
+      "WebFetch(domain:sequoia-pgp.org)",
+      "WebFetch(domain:docs.sequoia-pgp.org)",
+      "WebFetch(domain:tails.net)",
+      "WebFetch(domain:gitlab.tails.boum.org)",
+      "WebFetch(domain:wiki.archlinux.org)",
+      "WebFetch(domain:formulae.brew.sh)"
+    ]
+  }
+}

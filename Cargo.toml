@@ -1,0 +1,57 @@
+[workspace]
+members = ["crates/kdub", "crates/kdub-lib"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+
+[workspace.dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+secrecy = "0.10"
+hex = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+pgp = "0.19"
+rand = "0.8"
+toml = "0.8"
+directories = "5"
+tempfile = "3"
+rstest = "0.24"
+ureq = { version = "3", features = ["socks-proxy"] }
+urlencoding = "2"
+sha1 = "0.10"
+openpgp-card = "0.6"
+openpgp-card-rpgp = "0.7"
+card-backend-pcsc = "0.5"
+
+# cargo-release configuration
+[workspace.metadata.release]
+shared-version = true # all crates share one version
+tag-name = "v{{version}}" # tags like v0.1.0
+pre-release-commit-message = "release: v{{version}}"
+tag-message = "v{{version}}"
+pre-release-hook = [
+  "git",
+  "cliff",
+  "--output",
+  "CHANGELOG.md",
+  "--tag",
+  "v{{version}}",
+]
+publish = false # don't publish to crates.io (internal lib)
+push = true
+push-remote = "origin"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+lto = true
+strip = true
+codegen-units = 1

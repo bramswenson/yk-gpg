@@ -1,0 +1,32 @@
+[package]
+name = "kdub-lib"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+secrecy.workspace = true
+chrono.workspace = true
+pgp.workspace = true
+rand.workspace = true
+toml.workspace = true
+directories.workspace = true
+
+ureq.workspace = true
+urlencoding.workspace = true
+sha1.workspace = true
+
+openpgp-card.workspace = true
+openpgp-card-rpgp.workspace = true
+card-backend-pcsc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+mockall = "0.13"
+rstest = { workspace = true }

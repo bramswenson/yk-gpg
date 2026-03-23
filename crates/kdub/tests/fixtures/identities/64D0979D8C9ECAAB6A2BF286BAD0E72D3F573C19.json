@@ -1,0 +1,11 @@
+{
+  "identity": "Second Fixture <second@test.example>",
+  "fingerprint": "64D0979D8C9ECAAB6A2BF286BAD0E72D3F573C19",
+  "key_type": "ed25519",
+  "created": "2026-03-22T22:55:44.719154892Z",
+  "backed_up": null,
+  "renewed": null,
+  "rotated": null,
+  "card_serial": null,
+  "provisioned": null
+}
