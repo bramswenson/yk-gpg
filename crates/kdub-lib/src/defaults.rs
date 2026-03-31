@@ -88,15 +88,22 @@ pub const TAILS_MIN_USB_SIZE_BYTES: u64 = 8_000_000_000;
 /// Paths and mount options written to `persistence.conf` on the Tails volume.
 ///
 /// Each entry is `(destination, options)` and becomes one tab-separated line
-/// in the file. These three entries enable:
-/// - `Persistent` — the standard user-visible persistent folder
-/// - `.gnupg` — GnuPG keyring and configuration
-/// - dotfiles via `link` — personal configuration files symlinked into `$HOME`
+/// in the file. Only the core features that kdub can fully pre-seed are
+/// included. Other features (cups, NetworkManager, apt, etc.) are left for
+/// the user to enable via the Persistent Storage UI in Tails, which populates
+/// the required configuration files that kdub cannot create from outside Tails.
 pub const TAILS_PERSISTENCE_CONF_ENTRIES: &[(&str, &str)] = &[
-    ("/home/amnesia/Persistent", "source=Persistent"),
-    ("/home/amnesia/.gnupg", "source=gnupg"),
     ("/home/amnesia", "source=dotfiles,link"),
+    ("/home/amnesia/.gnupg", "source=gnupg"),
+    ("/home/amnesia/Persistent", "source=Persistent"),
 ];
+
+/// Target size for Tails system partition (partition 1) after resize.
+///
+/// Tails resizes partition 1 from the ISO's ~1.9 GiB to 8 GiB on first boot
+/// for overlay/temp space. We replicate this resize during `kdub tails persist`
+/// so Tails doesn't report a partitioning error.
+pub const TAILS_PARTITION1_SIZE: &str = "8GiB";
 
 /// Device mapper name used for the LUKS container during persistence setup.
 ///

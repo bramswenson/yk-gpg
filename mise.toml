@@ -5,7 +5,7 @@ pinact = "3.9.0"
 pkl = "0.31.0"
 taplo = "0.10.0"
 typos = "1.44.0"
-zipsign = "0.2.1"
+# zipsign installed via: cargo install zipsign (not in mise registry)
 zizmor = "1.23.1"
 
 [tasks."zipsign:setup"]
@@ -58,6 +58,117 @@ set -euo pipefail
 
 echo "Releasing v${usage_version}..."
 HK_SKIP_STEPS=no-commit-to-branch cargo release "${usage_version}" --no-confirm --execute
+"""
+
+[tasks."qemu:boot-usb"]
+description = "Boot a real USB drive in QEMU via USB host passthrough (Tails, live Linux, etc.)"
+usage = '''
+arg "<device>" help="USB block device to boot from (e.g. /dev/sdd)"
+flag "--ram <ram>" default="8192" help="RAM in MB (default: 8192)"
+flag "--cores <cores>" default="8" help="CPU cores (default: 8)"
+'''
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEVICE="${usage_device}"
+RAM="${usage_ram}"
+CORES="${usage_cores}"
+
+if [ ! -b "$DEVICE" ]; then
+  echo "ERROR: $DEVICE is not a block device." >&2
+  echo "Usage: mise run qemu:boot-usb /dev/sdX" >&2
+  exit 1
+fi
+
+# Unmount any mounted filesystems on the device
+for mp in $(findmnt -rno TARGET -S "$DEVICE"* 2>/dev/null); do
+  echo "Unmounting $mp..."
+  sudo umount "$mp" 2>/dev/null || true
+done
+
+# Close any LUKS containers on the device
+for dm in $(lsblk -rno NAME,TYPE "$DEVICE" 2>/dev/null | awk '$2=="crypt"{print $1}'); do
+  echo "Closing LUKS container $dm..."
+  sudo cryptsetup close "$dm" 2>/dev/null || true
+done
+
+# Disable GNOME automounting to prevent the host from grabbing the USB
+# device when Tails power-cycles it during boot.
+AUTOMOUNT_WAS_ON=false
+if gsettings get org.gnome.desktop.media-handling automount 2>/dev/null | grep -q true; then
+  AUTOMOUNT_WAS_ON=true
+  echo "Disabling GNOME automount..."
+  gsettings set org.gnome.desktop.media-handling automount false
+  gsettings set org.gnome.desktop.media-handling automount-open false
+fi
+
+# Re-enable automount on exit (even if QEMU crashes)
+cleanup() {
+  if [ "$AUTOMOUNT_WAS_ON" = "true" ]; then
+    echo "Re-enabling GNOME automount..."
+    gsettings set org.gnome.desktop.media-handling automount true
+    gsettings set org.gnome.desktop.media-handling automount-open true
+  fi
+}
+trap cleanup EXIT
+
+# Resolve USB bus/device address for host passthrough
+DEVNAME=$(basename "$DEVICE")
+SYSPATH=$(readlink -f "/sys/block/$DEVNAME" 2>/dev/null)
+
+if [ -z "$SYSPATH" ]; then
+  echo "ERROR: Cannot resolve sysfs path for $DEVICE" >&2
+  exit 1
+fi
+
+USB_SYSPATH="$SYSPATH"
+while [ -n "$USB_SYSPATH" ] && [ "$USB_SYSPATH" != "/" ]; do
+  if [ -f "$USB_SYSPATH/busnum" ] && [ -f "$USB_SYSPATH/devnum" ]; then
+    break
+  fi
+  USB_SYSPATH=$(dirname "$USB_SYSPATH")
+done
+
+if [ ! -f "$USB_SYSPATH/busnum" ] || [ ! -f "$USB_SYSPATH/devnum" ]; then
+  echo "ERROR: $DEVICE does not appear to be a USB device (no busnum/devnum in sysfs)" >&2
+  exit 1
+fi
+
+BUSNUM=$(cat "$USB_SYSPATH/busnum")
+DEVNUM=$(cat "$USB_SYSPATH/devnum")
+PRODUCT=$(cat "$USB_SYSPATH/product" 2>/dev/null || echo "USB device")
+
+echo "USB device: $PRODUCT (bus $BUSNUM, device $DEVNUM)"
+
+# Unbind the usb-storage driver from this device so the host kernel
+# doesn't reclaim it when Tails resets the USB during boot.
+# Find the usb-storage interface directory and unbind it.
+for intf in "$USB_SYSPATH"/*:*/driver; do
+  if [ -L "$intf" ] && readlink "$intf" | grep -q usb-storage; then
+    INTF_DIR=$(dirname "$intf")
+    INTF_NAME=$(basename "$INTF_DIR")
+    echo "Unbinding usb-storage from $INTF_NAME..."
+    echo "$INTF_NAME" | sudo tee /sys/bus/usb/drivers/usb-storage/unbind > /dev/null 2>&1 || true
+  fi
+done
+
+echo "Booting QEMU with USB host passthrough (${RAM}MB RAM, ${CORES} cores)..."
+echo "  Close the QEMU window or press Ctrl+C to stop."
+echo ""
+
+sudo qemu-system-x86_64 \
+  -enable-kvm \
+  -cpu host,-svm \
+  -m "$RAM" \
+  -smp "$CORES" \
+  -bios /usr/share/ovmf/OVMF.fd \
+  -device qemu-xhci,id=xhci \
+  -device usb-host,bus=xhci.0,hostbus="$BUSNUM",hostaddr="$DEVNUM",bootindex=1,guest-reset=true,guest-resets-all=true \
+  -device usb-tablet,bus=xhci.0 \
+  -nic user,model=e1000 \
+  -display gtk,show-cursor=on \
+  -vga std
 """
 
 [tasks."actions:pin"]

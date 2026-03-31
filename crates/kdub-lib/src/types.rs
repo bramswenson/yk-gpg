@@ -649,6 +649,89 @@ mod tests {
         assert_eq!(KeyType::Rsa4096.to_string(), "rsa4096");
     }
 
+    // ---- Debug redaction tests ----
+
+    #[test]
+    fn admin_pin_debug_redacted() {
+        let pin: AdminPin = "12345678".parse().unwrap();
+        let debug_str = format!("{pin:?}");
+        assert!(debug_str.contains("[REDACTED]"), "got: {debug_str}");
+        assert!(
+            !debug_str.contains("12345678"),
+            "secret leaked: {debug_str}"
+        );
+    }
+
+    #[test]
+    fn user_pin_debug_redacted() {
+        let pin: UserPin = "123456".parse().unwrap();
+        let debug_str = format!("{pin:?}");
+        assert!(debug_str.contains("[REDACTED]"), "got: {debug_str}");
+        assert!(!debug_str.contains("123456"), "secret leaked: {debug_str}");
+    }
+
+    #[test]
+    fn passphrase_debug_redacted() {
+        let pp: Passphrase = "supersecret".parse().unwrap();
+        let debug_str = format!("{pp:?}");
+        assert!(debug_str.contains("[REDACTED]"), "got: {debug_str}");
+        assert!(
+            !debug_str.contains("supersecret"),
+            "secret leaked: {debug_str}"
+        );
+    }
+
+    #[test]
+    fn github_token_debug_redacted() {
+        let tok: GithubToken = "ghp_abc123xyz".parse().unwrap();
+        let debug_str = format!("{tok:?}");
+        assert!(debug_str.contains("[REDACTED]"), "got: {debug_str}");
+        assert!(
+            !debug_str.contains("ghp_abc123xyz"),
+            "secret leaked: {debug_str}"
+        );
+    }
+
+    #[test]
+    fn fingerprint_debug_format() {
+        let fp: Fingerprint = "D3B9C00B365DC5B752A6554A0630571A396BC2A7".parse().unwrap();
+        let debug_str = format!("{fp:?}");
+        assert!(
+            debug_str.contains("Fingerprint(D3B9C00B365DC5B752A6554A0630571A396BC2A7)"),
+            "got: {debug_str}"
+        );
+    }
+
+    // ---- CardSerial::from_stub tests ----
+
+    #[test]
+    fn card_serial_from_stub_valid_hex() {
+        let serial = CardSerial::from_stub(Some("deadbeef".to_string()));
+        // Valid hex is normalized to uppercase.
+        assert_eq!(serial.to_string(), "DEADBEEF");
+    }
+
+    #[test]
+    fn card_serial_from_stub_none_returns_unknown() {
+        let serial = CardSerial::from_stub(None);
+        assert_eq!(serial.to_string(), "unknown");
+    }
+
+    #[test]
+    fn card_serial_from_stub_non_hex_uses_raw() {
+        // Non-hex strings fall back to raw storage without validation.
+        let serial = CardSerial::from_stub(Some("not-valid-hex!!".to_string()));
+        assert_eq!(serial.to_string(), "not-valid-hex!!");
+    }
+
+    // ---- CardSerial::new_raw test ----
+
+    #[test]
+    fn card_serial_new_raw_stores_as_is() {
+        let serial = CardSerial::new_raw("custom-raw-value");
+        assert_eq!(serial.to_string(), "custom-raw-value");
+    }
+
     #[test]
     fn key_type_serde_roundtrip() {
         let kt = KeyType::Ed25519;

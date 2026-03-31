@@ -305,4 +305,113 @@ mod tests {
             2
         );
     }
+
+    #[test]
+    fn display_config() {
+        let err = KdubError::Config("missing field: key_type".into());
+        assert_eq!(err.to_string(), "config error: missing field: key_type");
+    }
+
+    #[test]
+    fn exit_code_config() {
+        assert_eq!(KdubError::Config("bad config".into()).exit_code(), 1);
+    }
+
+    #[test]
+    fn display_key_gen() {
+        let err = KdubError::KeyGen("entropy exhausted".into());
+        assert_eq!(err.to_string(), "key generation error: entropy exhausted");
+    }
+
+    #[test]
+    fn exit_code_key_gen() {
+        assert_eq!(KdubError::KeyGen("oops".into()).exit_code(), 1);
+    }
+
+    #[test]
+    fn display_backup() {
+        let err = KdubError::Backup("write failed".into());
+        assert_eq!(err.to_string(), "backup error: write failed");
+    }
+
+    #[test]
+    fn exit_code_backup() {
+        assert_eq!(KdubError::Backup("write failed".into()).exit_code(), 1);
+    }
+
+    #[test]
+    fn display_backup_not_found() {
+        let fp: crate::types::Fingerprint =
+            "D3B9C00B365DC5B752A6554A0630571A396BC2A7".parse().unwrap();
+        let err = KdubError::BackupNotFound(fp);
+        assert_eq!(
+            err.to_string(),
+            "backup not found for fingerprint: D3B9C00B365DC5B752A6554A0630571A396BC2A7"
+        );
+    }
+
+    #[test]
+    fn exit_code_backup_not_found() {
+        let fp: crate::types::Fingerprint =
+            "D3B9C00B365DC5B752A6554A0630571A396BC2A7".parse().unwrap();
+        assert_eq!(KdubError::BackupNotFound(fp).exit_code(), 4);
+    }
+
+    #[test]
+    fn display_key_not_found() {
+        let err = KdubError::KeyNotFound("DEADBEEF".into());
+        assert_eq!(err.to_string(), "key not found: DEADBEEF");
+    }
+
+    #[test]
+    fn exit_code_key_not_found() {
+        assert_eq!(KdubError::KeyNotFound("x".into()).exit_code(), 4);
+    }
+
+    #[test]
+    fn display_ambiguous_identity() {
+        let err = KdubError::AmbiguousIdentity("alice@example.com matches 2 keys".into());
+        assert_eq!(
+            err.to_string(),
+            "ambiguous identity: alice@example.com matches 2 keys"
+        );
+    }
+
+    #[test]
+    fn exit_code_ambiguous_identity() {
+        assert_eq!(KdubError::AmbiguousIdentity("x".into()).exit_code(), 1);
+    }
+
+    #[test]
+    fn display_renew() {
+        let err = KdubError::Renew("subkey expired".into());
+        assert_eq!(err.to_string(), "key renewal error: subkey expired");
+    }
+
+    #[test]
+    fn exit_code_renew() {
+        assert_eq!(KdubError::Renew("x".into()).exit_code(), 1);
+    }
+
+    #[test]
+    fn display_rotate() {
+        let err = KdubError::Rotate("card not writable".into());
+        assert_eq!(err.to_string(), "key rotation error: card not writable");
+    }
+
+    #[test]
+    fn exit_code_rotate() {
+        assert_eq!(KdubError::Rotate("x".into()).exit_code(), 1);
+    }
+
+    #[test]
+    fn display_publish() {
+        let err = KdubError::Publish("rate limited".into());
+        assert_eq!(err.to_string(), "publish error: rate limited");
+    }
+
+    #[test]
+    fn exit_code_publish() {
+        assert_eq!(KdubError::Publish("x".into()).exit_code(), 1);
+    }
 }

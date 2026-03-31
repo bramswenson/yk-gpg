@@ -4,6 +4,11 @@
 [test-groups.slow-tests]
 max-threads = 1
 
+# Card tests hit the PCSC smart card daemon socket and fail when run in
+# parallel due to socket contention. Serialize them.
+[test-groups.card-tests]
+max-threads = 1
+
 [profile.default]
 # Fail fast on first failure
 fail-fast = true
@@ -11,6 +16,10 @@ fail-fast = true
 slow-timeout = { period = "30s", terminate-after = 3 }
 # Exclude slow key-generation tests from local runs and pre-push hooks
 default-filter = "not test(test_generate_rsa4096_key) and not test(test_key_create_with_env_key_type)"
+
+[[profile.default.overrides]]
+filter = "test(card_info) | test(card_safety)"
+test-group = "card-tests"
 
 [profile.default.junit]
 path = "target/nextest/default/junit.xml"

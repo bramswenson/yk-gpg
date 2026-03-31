@@ -189,13 +189,14 @@ fn looks_like_version(s: &str) -> bool {
     first.is_some_and(|c| c.is_ascii_digit()) && s.contains('.')
 }
 
-/// Scan `/proc` for a running pcscd process (Linux-specific).
+/// Check if pcscd is available on Linux — either running as a process
+/// or available via systemd socket activation (pcscd.socket).
 fn check_pcscd_linux() -> DaemonStatus {
+    // Check for running process first
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            // Only look at numeric PID directories
             if !name_str.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 continue;
             }
@@ -206,6 +207,17 @@ fn check_pcscd_linux() -> DaemonStatus {
             }
         }
     }
+
+    // Not running as a process — check if pcscd.socket is active (socket activation).
+    // Modern Linux (including Tails) starts pcscd on demand via systemd socket.
+    if let Ok(output) = std::process::Command::new("systemctl")
+        .args(["is-active", "pcscd.socket"])
+        .output()
+        && output.status.success()
+    {
+        return DaemonStatus::Running;
+    }
+
     DaemonStatus::NotRunning
 }
 
@@ -892,6 +904,97 @@ mod tests {
         settings.bind(|| {
             insta::assert_snapshot!(json);
         });
+    }
+
+    #[test]
+    fn test_plain_text_missing_required_dep_shows_missing_label() {
+        // Construct a report directly with a required=true, Missing dep to exercise
+        // the "MISSING" label branch in to_plain_text().
+        let report = DoctorReport {
+            dependencies: vec![DepCheck {
+                name: "required-tool".to_string(),
+                required: true,
+                status: DepStatus::Missing,
+            }],
+            config_dir: std::path::PathBuf::from("/some/config"),
+            config_dir_exists: true,
+            data_dir: std::path::PathBuf::from("/some/data"),
+            data_dir_exists: true,
+            platform: "linux".to_string(),
+            overall_ok: false,
+            tails: None,
+        };
+        let text = report.to_plain_text();
+        assert!(
+            text.contains("MISSING"),
+            "expected MISSING in output, got: {text}"
+        );
+        // Should NOT say "not found" for required deps.
+        assert!(
+            !text.contains("not found"),
+            "required dep should say MISSING not 'not found', got: {text}"
+        );
+        assert!(
+            text.contains("Some required dependencies are missing."),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn test_plain_text_config_dir_does_not_exist() {
+        let report = DoctorReport {
+            dependencies: vec![],
+            config_dir: std::path::PathBuf::from("/nonexistent/config"),
+            config_dir_exists: false,
+            data_dir: std::path::PathBuf::from("/nonexistent/data"),
+            data_dir_exists: false,
+            platform: "linux".to_string(),
+            overall_ok: true,
+            tails: None,
+        };
+        let text = report.to_plain_text();
+        // Both config dir and data dir should show "missing" when they don't exist.
+        let missing_count = text.matches("missing").count();
+        assert!(
+            missing_count >= 2,
+            "expected at least 2 'missing' occurrences for non-existent dirs, got: {text}"
+        );
+    }
+
+    #[test]
+    fn test_plain_text_tails_network_connected_and_persistence_not_mounted() {
+        let deps = MockDeps::all_present();
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+
+        let tails = Some(crate::tails::TailsEnvironment {
+            version: "7.5".to_string(),
+            persistence_mounted: false,
+            network_connected: true,
+            kdub_on_persistent: false,
+        });
+
+        let report = run_doctor(&deps, &config, &data, tails).unwrap();
+        let text = report.to_plain_text();
+
+        // Network connected should show WARN.
+        assert!(
+            text.contains("WARN") && text.contains("disable networking"),
+            "expected network warning, got: {text}"
+        );
+        // Persistence not mounted should show MISSING.
+        assert!(
+            text.contains("not mounted") && text.contains("MISSING"),
+            "expected persistence MISSING warning, got: {text}"
+        );
+        // kdub not on persistent should show WARN.
+        assert!(
+            text.contains("not persistent"),
+            "expected kdub location warning, got: {text}"
+        );
     }
 
     #[test]

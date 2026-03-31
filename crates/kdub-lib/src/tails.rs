@@ -232,9 +232,18 @@ ID=ubuntu
             let parts: Vec<&str> = line.split('\t').collect();
             assert_eq!(parts.len(), 2, "each line must be tab-separated: {line}");
         }
-        assert!(lines[0].starts_with("/home/amnesia/Persistent\t"));
-        assert!(lines[1].starts_with("/home/amnesia/.gnupg\t"));
-        assert!(lines[2].starts_with("/home/amnesia\t"));
+        // Verify all 3 destination paths are present
+        let expected_destinations = [
+            "/home/amnesia",
+            "/home/amnesia/.gnupg",
+            "/home/amnesia/Persistent",
+        ];
+        for dest in &expected_destinations {
+            assert!(
+                conf.contains(dest),
+                "persistence.conf should contain {dest}"
+            );
+        }
     }
 
     #[test]

@@ -108,7 +108,25 @@ fn run_flash(args: &TailsFlashArgs, global: &GlobalOpts) -> CmdResult {
         ));
     }
 
-    // 4. Display device table
+    // 4. Reject early if all devices have mounted filesystems
+    let all_mounted = devices.iter().all(|d| !d.mount_points.is_empty());
+    if all_mounted {
+        let table = format_device_table(&devices);
+        println!("{table}");
+        println!();
+        let cmds: Vec<&str> = devices
+            .iter()
+            .flat_map(|d| d.unmount_commands.iter())
+            .map(|s| s.as_str())
+            .collect();
+        return Err(KdubError::TailsFlash(format!(
+            "All removable devices have mounted filesystems.\n\
+             Run these commands, then re-run kdub tails flash:\n\n  {}",
+            cmds.join("\n  ")
+        )));
+    }
+
+    // 5. Display device table
     let table = format_device_table(&devices);
     println!("{table}");
     println!();
@@ -266,6 +284,7 @@ fn run_persist(args: &TailsPersistArgs, global: &GlobalOpts) -> CmdResult {
         passphrase,
         skip_preseed: args.skip_preseed,
         kdub_binary_path,
+        quiet: global.quiet,
     };
 
     let deps = kdub_lib::tails_persist::LinuxTailsSystemDeps;

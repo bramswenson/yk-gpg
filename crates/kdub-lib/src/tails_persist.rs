@@ -16,9 +16,9 @@ use tracing::{debug, warn};
 use crate::config::{
     DIRMNGR_CONF, GPG_CONF, default_config_toml, generate_gpg_agent_conf, generate_scdaemon_conf,
 };
+use crate::defaults;
 use crate::defaults::{TAILS_LUKS_MAPPER_NAME, TAILS_PARTITION_LABEL, TAILS_PARTITION_TYPE_GUID};
 use crate::error::KdubError;
-use crate::tails::generate_persistence_conf;
 use crate::types::Passphrase;
 
 /// Abstracts system commands for partition/LUKS/filesystem operations.
@@ -47,6 +47,12 @@ pub trait TailsSystemDeps {
     fn mount(&self, device: &Path, target: &Path) -> Result<(), KdubError>;
     /// Unmount a filesystem.
     fn umount(&self, target: &Path) -> Result<(), KdubError>;
+    /// Create the Tails persistence directory layout with correct ownership.
+    ///
+    /// Sets the mount root to `770 root:root`, writes `persistence.conf`,
+    /// and creates all directories with the ownership Tails expects:
+    /// root-owned system dirs and uid 1000 (amnesia) user dirs.
+    fn setup_persistence_layout(&self, mount_point: &Path) -> Result<(), KdubError>;
     /// Check if a system command exists in PATH.
     fn command_exists(&self, name: &str) -> bool;
 }
@@ -54,19 +60,131 @@ pub trait TailsSystemDeps {
 /// Linux implementation that shells out to system tools.
 ///
 /// Each method invokes the corresponding CLI utility (`parted`, `cryptsetup`,
-/// `mkfs.ext4`, `mount`, `umount`) as a subprocess. Passphrase-bearing commands
-/// pipe the secret via stdin to avoid exposing it in the process table.
+/// `mkfs.ext4`, `mount`, `umount`) via `sudo` for privilege escalation.
+/// Passphrase-bearing commands pipe the secret via stdin to avoid exposing
+/// it in the process table. `sudo` prompts for the user's password on the
+/// first invocation and caches the credential for subsequent calls.
 #[cfg(target_os = "linux")]
 pub struct LinuxTailsSystemDeps;
 
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn sudo_mkdir_chown(path: &Path, mode: &str, uid: u32, gid: u32) -> Result<(), KdubError> {
+    // sudo mkdir -p
+    let mkdir_out = Command::new("sudo")
+        .args(["mkdir", "-p"])
+        .arg(path)
+        .output()
+        .map_err(|e| KdubError::TailsPersist(format!("failed to mkdir {}: {e}", path.display())))?;
+    if !mkdir_out.status.success() {
+        let stderr = String::from_utf8_lossy(&mkdir_out.stderr);
+        return Err(KdubError::TailsPersist(format!(
+            "mkdir {} failed: {stderr}",
+            path.display()
+        )));
+    }
+    // sudo chmod
+    let chmod_out = Command::new("sudo")
+        .args(["chmod", mode])
+        .arg(path)
+        .output()
+        .map_err(|e| KdubError::TailsPersist(format!("failed to chmod {}: {e}", path.display())))?;
+    if !chmod_out.status.success() {
+        let stderr = String::from_utf8_lossy(&chmod_out.stderr);
+        return Err(KdubError::TailsPersist(format!(
+            "chmod {} failed: {stderr}",
+            path.display()
+        )));
+    }
+    // sudo chown
+    let chown_out = Command::new("sudo")
+        .args(["chown", &format!("{uid}:{gid}")])
+        .arg(path)
+        .output()
+        .map_err(|e| KdubError::TailsPersist(format!("failed to chown {}: {e}", path.display())))?;
+    if !chown_out.status.success() {
+        let stderr = String::from_utf8_lossy(&chown_out.stderr);
+        return Err(KdubError::TailsPersist(format!(
+            "chown {} failed: {stderr}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl TailsSystemDeps for LinuxTailsSystemDeps {
     fn create_partition(&self, device: &Path) -> Result<PathBuf, KdubError> {
+        // Replicate Tails' first-boot partitioning:
+        // 1. Randomize disk GUID (Tails checks it was changed from the ISO default)
+        // 2. Resize partition 1 to 8 GiB
+        // 3. Resize the FAT filesystem inside partition 1 to fill the expanded partition
+        // The --fix flag tells parted to repair the GPT backup header automatically.
+
+        // Step 1: Randomize disk GUID.
+        // Tails' verify_partition_table checks that the GUID was changed from
+        // the ISO's hardcoded value 17B81DA0-8B1E-4269-9C39-FE5C7B9B58A3.
+        debug!(?device, "randomizing disk GUID");
+        let guid_output = Command::new("sudo")
+            .args(["sgdisk", "--randomize-guids"])
+            .arg(device)
+            .output()
+            .map_err(|e| KdubError::TailsPersist(format!("failed to randomize disk GUID: {e}")))?;
+        if !guid_output.status.success() {
+            let stderr = String::from_utf8_lossy(&guid_output.stderr);
+            return Err(KdubError::TailsPersist(format!(
+                "sgdisk --randomize-guids failed: {stderr}"
+            )));
+        }
+
+        // Step 2: Resize partition 1 to 8 GiB.
+        debug!(
+            ?device,
+            "resizing partition 1 to {}",
+            defaults::TAILS_PARTITION1_SIZE
+        );
+        let resize_output = Command::new("sudo")
+            .args(["parted", "--fix", "--script"])
+            .arg(device)
+            .args(["resizepart", "1", defaults::TAILS_PARTITION1_SIZE])
+            .output()
+            .map_err(|e| KdubError::TailsPersist(format!("failed to resize partition 1: {e}")))?;
+        if !resize_output.status.success() {
+            let stderr = String::from_utf8_lossy(&resize_output.stderr);
+            return Err(KdubError::TailsPersist(format!(
+                "parted resizepart 1 failed: {stderr}"
+            )));
+        }
+        debug!("partition 1 resized");
+
+        // Step 3: Resize the FAT filesystem inside partition 1 to fill the
+        // expanded partition. Tails' verify_partition_table checks that the
+        // FAT filesystem was resized, not just the partition boundary.
+        let device_str = device.to_string_lossy();
+        let part1_path = if device_str.ends_with(|c: char| c.is_ascii_digit()) {
+            format!("{device_str}p1")
+        } else {
+            format!("{device_str}1")
+        };
+        debug!(part1 = %part1_path, "resizing FAT filesystem");
+        let fatresize_output = Command::new("sudo")
+            .args(["fatresize", "-f", "-s", "8Gi"])
+            .arg(&part1_path)
+            .output()
+            .map_err(|e| KdubError::TailsPersist(format!("failed to run fatresize: {e}")))?;
+        if !fatresize_output.status.success() {
+            let stderr = String::from_utf8_lossy(&fatresize_output.stderr);
+            return Err(KdubError::TailsPersist(format!(
+                "fatresize failed: {stderr}"
+            )));
+        }
+        debug!("FAT filesystem resized");
+
         // Read current partition table to find where to start.
         debug!(?device, "reading partition table");
-        let print_output = Command::new("parted")
-            .args(["--script", "--machine"])
+        let print_output = Command::new("sudo")
+            .args(["parted", "--fix", "--script", "--machine"])
             .arg(device)
             .arg("print")
             .output()
@@ -96,8 +214,8 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
         debug!(?start, "creating partition after existing partitions");
 
         // Create the partition in the free space.
-        let mkpart_output = Command::new("parted")
-            .args(["--script"])
+        let mkpart_output = Command::new("sudo")
+            .args(["parted", "--fix", "--script"])
             .arg(device)
             .args(["mkpart", TAILS_PARTITION_LABEL, "ext4", &start, "100%"])
             .output()
@@ -112,8 +230,8 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
 
         // Re-query partition table to find the newly created partition number.
         debug!("re-reading partition table after mkpart");
-        let reprint_output = Command::new("parted")
-            .args(["--script", "--machine"])
+        let reprint_output = Command::new("sudo")
+            .args(["parted", "--fix", "--script", "--machine"])
             .arg(device)
             .arg("print")
             .output()
@@ -144,7 +262,8 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
 
         // Set the partition type GUID with sgdisk.
         debug!(part_number, "setting partition type GUID");
-        let sgdisk_output = Command::new("sgdisk")
+        let sgdisk_output = Command::new("sudo")
+            .arg("sgdisk")
             .arg("-t")
             .arg(format!("{part_number}:{TAILS_PARTITION_TYPE_GUID}"))
             .arg(device)
@@ -170,7 +289,8 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
 
     fn luks_format(&self, partition: &Path, passphrase: &str) -> Result<(), KdubError> {
         debug!(?partition, "formatting partition with LUKS2");
-        let mut child = Command::new("cryptsetup")
+        let mut child = Command::new("sudo")
+            .arg("cryptsetup")
             .args([
                 "luksFormat",
                 "--batch-mode",
@@ -216,7 +336,8 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
         name: &str,
     ) -> Result<PathBuf, KdubError> {
         debug!(?partition, name, "opening LUKS container");
-        let mut child = Command::new("cryptsetup")
+        let mut child = Command::new("sudo")
+            .arg("cryptsetup")
             .args(["luksOpen", "--key-file=-"])
             .arg(partition)
             .arg(name)
@@ -253,8 +374,8 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
 
     fn luks_close(&self, name: &str) -> Result<(), KdubError> {
         debug!(name, "closing LUKS container");
-        let output = Command::new("cryptsetup")
-            .args(["luksClose", name])
+        let output = Command::new("sudo")
+            .args(["cryptsetup", "luksClose", name])
             .output()
             .map_err(|e| {
                 KdubError::TailsPersist(format!("failed to run cryptsetup luksClose: {e}"))
@@ -273,7 +394,8 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
 
     fn mkfs_ext4(&self, device: &Path, label: &str) -> Result<(), KdubError> {
         debug!(?device, label, "creating ext4 filesystem");
-        let output = Command::new("mkfs.ext4")
+        let output = Command::new("sudo")
+            .arg("mkfs.ext4")
             .args(["-L", label])
             .arg(device)
             .output()
@@ -292,7 +414,8 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
 
     fn mount(&self, device: &Path, target: &Path) -> Result<(), KdubError> {
         debug!(?device, ?target, "mounting filesystem");
-        let output = Command::new("mount")
+        let output = Command::new("sudo")
+            .arg("mount")
             .arg(device)
             .arg(target)
             .output()
@@ -309,7 +432,8 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
 
     fn umount(&self, target: &Path) -> Result<(), KdubError> {
         debug!(?target, "unmounting filesystem");
-        let output = Command::new("umount")
+        let output = Command::new("sudo")
+            .arg("umount")
             .arg(target)
             .output()
             .map_err(|e| KdubError::TailsPersist(format!("failed to run umount: {e}")))?;
@@ -320,6 +444,78 @@ impl TailsSystemDeps for LinuxTailsSystemDeps {
         }
 
         debug!("filesystem unmounted");
+        Ok(())
+    }
+
+    fn setup_persistence_layout(&self, mount_point: &Path) -> Result<(), KdubError> {
+        debug!(?mount_point, "setting up persistence directory layout");
+
+        // Fix mount root ownership (mkfs creates as root, but mode may differ)
+        // Temporarily set mount root to 777 so populate_persistence (running as
+        // the current user) can write into subdirectories. The orchestrator
+        // tightens this to 770 root:root after population completes.
+        let chmod_out = Command::new("sudo")
+            .args(["chmod", "777"])
+            .arg(mount_point)
+            .output()
+            .map_err(|e| KdubError::TailsPersist(format!("failed to chmod mount root: {e}")))?;
+        if !chmod_out.status.success() {
+            let stderr = String::from_utf8_lossy(&chmod_out.stderr);
+            return Err(KdubError::TailsPersist(format!(
+                "chmod mount root failed: {stderr}"
+            )));
+        }
+
+        // Write persistence.conf as root via sudo tee
+        let conf_content = crate::tails::generate_persistence_conf();
+        let conf_path = mount_point.join("persistence.conf");
+        let mut child = Command::new("sudo")
+            .args(["tee"])
+            .arg(&conf_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                KdubError::TailsPersist(format!("failed to write persistence.conf: {e}"))
+            })?;
+        {
+            let stdin = child.stdin.as_mut().expect("stdin was configured as piped");
+            stdin.write_all(conf_content.as_bytes()).map_err(|e| {
+                KdubError::TailsPersist(format!("failed to write persistence.conf content: {e}"))
+            })?;
+        }
+        let tee_out = child
+            .wait_with_output()
+            .map_err(|e| KdubError::TailsPersist(format!("tee wait failed: {e}")))?;
+        if !tee_out.status.success() {
+            let stderr = String::from_utf8_lossy(&tee_out.stderr);
+            return Err(KdubError::TailsPersist(format!(
+                "tee persistence.conf failed: {stderr}"
+            )));
+        }
+        // Set permissions and ownership on persistence.conf.
+        // Tails' tpsd checks that persistence.conf is owned by the
+        // tails-persistence-setup user (uid 115, gid 122). Features
+        // are only shown as active when this ownership matches.
+        let _ = Command::new("sudo")
+            .args(["chmod", "600"])
+            .arg(&conf_path)
+            .output();
+        let _ = Command::new("sudo")
+            .args(["chown", "115:122"])
+            .arg(&conf_path)
+            .output();
+
+        // Only create directories for features in persistence.conf.
+        // Other features (cups, NetworkManager, apt, greeter-settings, tca)
+        // are left for the user to enable via the Tails Persistent Storage UI,
+        // which creates the directories with the correct Tails-internal content.
+        sudo_mkdir_chown(&mount_point.join("Persistent"), "700", 1000, 1000)?;
+        sudo_mkdir_chown(&mount_point.join("gnupg"), "700", 1000, 1000)?;
+        sudo_mkdir_chown(&mount_point.join("dotfiles"), "700", 1000, 1000)?;
+
+        debug!("persistence directory layout created");
         Ok(())
     }
 
@@ -347,6 +543,8 @@ pub struct PersistOptions {
     pub skip_preseed: bool,
     /// Path to the kdub binary to copy into persistence.
     pub kdub_binary_path: PathBuf,
+    /// Suppress user-facing status messages.
+    pub quiet: bool,
 }
 
 /// Create encrypted persistent storage on a Tails USB.
@@ -372,14 +570,23 @@ pub fn create_persistent_storage(
     check_required_tools(deps)?;
 
     // Create partition
+    if !opts.quiet {
+        eprintln!("Creating partition...");
+    }
     debug!(?opts.device, "creating partition");
     let partition = deps.create_partition(&opts.device)?;
 
-    // LUKS format
+    // LUKS format (includes argon2id KDF benchmarking — may take several seconds)
+    if !opts.quiet {
+        eprintln!("Encrypting partition (benchmarking KDF, this may take a moment)...");
+    }
     debug!(?partition, "formatting LUKS");
     deps.luks_format(&partition, opts.passphrase.expose_secret())?;
 
     // LUKS open
+    if !opts.quiet {
+        eprintln!("Opening encrypted volume...");
+    }
     debug!(?partition, "opening LUKS container");
     let mapper_device = deps.luks_open(
         &partition,
@@ -393,6 +600,7 @@ pub fn create_persistent_storage(
         &mapper_device,
         &opts.kdub_binary_path,
         opts.skip_preseed,
+        opts.quiet,
     );
 
     // Cleanup: always attempt to close LUKS
@@ -420,8 +628,12 @@ fn create_and_populate(
     mapper_device: &Path,
     kdub_binary_path: &Path,
     skip_preseed: bool,
+    quiet: bool,
 ) -> Result<(), KdubError> {
     // Create ext4 filesystem
+    if !quiet {
+        eprintln!("Creating filesystem...");
+    }
     debug!(?mapper_device, "creating ext4 filesystem");
     deps.mkfs_ext4(mapper_device, TAILS_PARTITION_LABEL)?;
 
@@ -433,8 +645,31 @@ fn create_and_populate(
     debug!(?mount_point, "mounting filesystem");
     deps.mount(mapper_device, &mount_point)?;
 
+    // Create Tails-native directory layout with correct ownership
+    if !quiet {
+        eprintln!("Setting up persistence directory layout...");
+    }
+    deps.setup_persistence_layout(&mount_point)?;
+
     // Populate, then always unmount
+    if !quiet {
+        eprintln!("Writing configuration and kdub binary...");
+    }
     let populate_result = populate_persistence(&mount_point, kdub_binary_path, skip_preseed);
+
+    // Tighten mount root permissions to 770 root:root (matching Tails-native).
+    // This runs regardless of populate success — best-effort before umount.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("sudo")
+            .args(["chmod", "770"])
+            .arg(&mount_point)
+            .output();
+        let _ = Command::new("sudo")
+            .args(["chown", "root:root"])
+            .arg(&mount_point)
+            .output();
+    }
 
     debug!(?mount_point, "unmounting filesystem");
     let umount_result = deps.umount(&mount_point);
@@ -449,14 +684,14 @@ fn create_and_populate(
 /// Verifies that `parted`, `cryptsetup`, `mkfs.ext4`, and `sgdisk` exist in PATH.
 /// Returns a helpful error listing any missing tools with install instructions.
 fn check_required_tools(deps: &dyn TailsSystemDeps) -> Result<(), KdubError> {
-    let required = ["parted", "cryptsetup", "mkfs.ext4", "sgdisk"];
+    let required = ["parted", "cryptsetup", "mkfs.ext4", "sgdisk", "fatresize"];
     let missing: Vec<_> = required
         .iter()
         .filter(|t| !deps.command_exists(t))
         .collect();
     if !missing.is_empty() {
         return Err(KdubError::TailsPersist(format!(
-            "missing required tools: {}. Install with: sudo apt install parted cryptsetup e2fsprogs gdisk",
+            "missing required tools: {}. Install with: sudo apt install parted cryptsetup e2fsprogs gdisk fatresize",
             missing
                 .iter()
                 .map(|s| s.to_string())
@@ -469,9 +704,9 @@ fn check_required_tools(deps: &dyn TailsSystemDeps) -> Result<(), KdubError> {
 
 /// Populate the mounted persistence volume with kdub files.
 ///
-/// Creates the Tails persistence directory structure, writes `persistence.conf`,
-/// copies the kdub binary, and optionally pre-seeds GPG and kdub configuration
-/// files for the Tails platform.
+/// Copies the kdub binary and optionally pre-seeds GPG and kdub configuration
+/// files for the Tails platform. Directory layout and `persistence.conf` are
+/// created by `setup_persistence_layout` before this function runs.
 fn populate_persistence(
     mount_point: &Path,
     kdub_binary: &Path,
@@ -479,20 +714,10 @@ fn populate_persistence(
 ) -> Result<(), KdubError> {
     debug!(?mount_point, "populating persistence volume");
 
-    // Write persistence.conf at root of mount_point
-    let conf_path = mount_point.join("persistence.conf");
-    let conf_content = generate_persistence_conf();
-    write_file_mode(&conf_path, &conf_content, 0o600)?;
-    debug!(?conf_path, "wrote persistence.conf");
-
-    // Create directory structure
-    let persistent_dir = mount_point.join("Persistent");
-    let gnupg_dir = mount_point.join("gnupg");
+    // Create subdirectories under dotfiles (parent dotfiles/ created by setup_persistence_layout)
     let dotfiles_bin_dir = mount_point.join("dotfiles/.local/bin");
     let dotfiles_config_dir = mount_point.join("dotfiles/.config/kdub");
 
-    create_dir_mode(&persistent_dir, 0o700)?;
-    create_dir_mode(&gnupg_dir, 0o700)?;
     create_dir_mode(&dotfiles_bin_dir, 0o700)?;
     create_dir_mode(&dotfiles_config_dir, 0o700)?;
 
@@ -512,7 +737,8 @@ fn populate_persistence(
     if !skip_preseed {
         debug!("pre-seeding configuration files");
 
-        // GPG configs in gnupg directory
+        // GPG configs in gnupg directory (created by setup_persistence_layout)
+        let gnupg_dir = mount_point.join("gnupg");
         write_file_mode(&gnupg_dir.join("gpg.conf"), GPG_CONF, 0o600)?;
 
         let gpg_agent_content = generate_gpg_agent_conf("tails");
@@ -577,6 +803,9 @@ mod tests {
         mock.expect_command_exists()
             .with(predicate::eq("sgdisk"))
             .returning(|_| true);
+        mock.expect_command_exists()
+            .with(predicate::eq("fatresize"))
+            .returning(|_| true);
 
         let result = check_required_tools(&mock);
         assert!(result.is_ok());
@@ -596,6 +825,9 @@ mod tests {
             .returning(|_| true);
         mock.expect_command_exists()
             .with(predicate::eq("sgdisk"))
+            .returning(|_| true);
+        mock.expect_command_exists()
+            .with(predicate::eq("fatresize"))
             .returning(|_| true);
 
         let result = check_required_tools(&mock);
@@ -626,6 +858,7 @@ mod tests {
             passphrase: "testpassphrase".parse().unwrap(),
             skip_preseed: false,
             kdub_binary_path: PathBuf::from("/usr/bin/kdub"),
+            quiet: true,
         };
 
         let result = create_persistent_storage(&mock, &opts);
@@ -641,6 +874,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mount_point = tmp.path();
 
+        // Pre-create directories that setup_persistence_layout would have created
+        fs::create_dir_all(mount_point.join("gnupg")).unwrap();
+        fs::create_dir_all(mount_point.join("dotfiles")).unwrap();
+
         // Create a fake binary to copy
         let binary_dir = tempfile::tempdir().unwrap();
         let binary_path = binary_dir.path().join("kdub");
@@ -649,43 +886,19 @@ mod tests {
         let result = populate_persistence(mount_point, &binary_path, false);
         assert!(result.is_ok(), "populate failed: {result:?}");
 
-        // Verify directory structure
-        assert!(mount_point.join("Persistent").is_dir());
-        assert!(mount_point.join("gnupg").is_dir());
+        // Verify directory structure created by populate_persistence
         assert!(mount_point.join("dotfiles/.local/bin").is_dir());
         assert!(mount_point.join("dotfiles/.config/kdub").is_dir());
-    }
-
-    #[test]
-    fn test_populate_persistence_writes_conf() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mount_point = tmp.path();
-
-        let binary_dir = tempfile::tempdir().unwrap();
-        let binary_path = binary_dir.path().join("kdub");
-        fs::write(&binary_path, b"fake-binary").unwrap();
-
-        populate_persistence(mount_point, &binary_path, false).unwrap();
-
-        let conf_content = fs::read_to_string(mount_point.join("persistence.conf")).unwrap();
-        assert!(
-            conf_content.contains("/home/amnesia/Persistent"),
-            "persistence.conf should contain Persistent entry: {conf_content}"
-        );
-        assert!(
-            conf_content.contains("/home/amnesia/.gnupg"),
-            "persistence.conf should contain gnupg entry: {conf_content}"
-        );
-        assert!(
-            conf_content.contains("/home/amnesia\t"),
-            "persistence.conf should contain dotfiles entry: {conf_content}"
-        );
     }
 
     #[test]
     fn test_populate_persistence_copies_binary() {
         let tmp = tempfile::tempdir().unwrap();
         let mount_point = tmp.path();
+
+        // Pre-create directories that setup_persistence_layout would have created
+        fs::create_dir_all(mount_point.join("gnupg")).unwrap();
+        fs::create_dir_all(mount_point.join("dotfiles")).unwrap();
 
         let binary_dir = tempfile::tempdir().unwrap();
         let binary_path = binary_dir.path().join("kdub");
@@ -709,16 +922,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mount_point = tmp.path();
 
+        // Pre-create directories that setup_persistence_layout would have created
+        fs::create_dir_all(mount_point.join("gnupg")).unwrap();
+        fs::create_dir_all(mount_point.join("dotfiles")).unwrap();
+
         let binary_dir = tempfile::tempdir().unwrap();
         let binary_path = binary_dir.path().join("kdub");
         fs::write(&binary_path, b"fake-binary").unwrap();
 
         populate_persistence(mount_point, &binary_path, true).unwrap();
 
-        // Structure and binary should still exist
-        assert!(mount_point.join("Persistent").is_dir());
+        // Binary should still exist
         assert!(mount_point.join("dotfiles/.local/bin/kdub").exists());
-        assert!(mount_point.join("persistence.conf").exists());
 
         // Config files should NOT be written when skip_preseed is true
         assert!(
@@ -750,6 +965,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mount_point = tmp.path();
 
+        // Pre-create directories that setup_persistence_layout would have created
+        fs::create_dir_all(mount_point.join("gnupg")).unwrap();
+        fs::create_dir_all(mount_point.join("dotfiles")).unwrap();
+
         let binary_dir = tempfile::tempdir().unwrap();
         let binary_path = binary_dir.path().join("kdub");
         fs::write(&binary_path, b"fake-binary").unwrap();
@@ -779,6 +998,10 @@ mod tests {
     fn test_populate_persistence_permissions() {
         let tmp = tempfile::tempdir().unwrap();
         let mount_point = tmp.path();
+
+        // Pre-create directories that setup_persistence_layout would have created
+        fs::create_dir_all(mount_point.join("gnupg")).unwrap();
+        fs::create_dir_all(mount_point.join("dotfiles")).unwrap();
 
         let binary_dir = tempfile::tempdir().unwrap();
         let binary_path = binary_dir.path().join("kdub");
@@ -810,14 +1033,11 @@ mod tests {
             );
         };
 
-        // Directories should be 0o700
-        check_dir_mode(&mount_point.join("Persistent"), 0o700);
-        check_dir_mode(&mount_point.join("gnupg"), 0o700);
+        // Directories created by populate_persistence should be 0o700
         check_dir_mode(&mount_point.join("dotfiles/.local/bin"), 0o700);
         check_dir_mode(&mount_point.join("dotfiles/.config/kdub"), 0o700);
 
         // Files should be 0o600 (except binary which is 0o700)
-        check_file_mode(&mount_point.join("persistence.conf"), 0o600);
         check_file_mode(&mount_point.join("gnupg/gpg.conf"), 0o600);
         check_file_mode(&mount_point.join("gnupg/gpg-agent.conf"), 0o600);
         check_file_mode(
@@ -880,6 +1100,15 @@ mod tests {
         // mount — just succeed
         mock.expect_mount().times(1).returning(|_, _| Ok(()));
 
+        // setup_persistence_layout — create dirs that populate needs
+        mock.expect_setup_persistence_layout()
+            .times(1)
+            .returning(|mount_point| {
+                fs::create_dir_all(mount_point.join("gnupg")).unwrap();
+                fs::create_dir_all(mount_point.join("dotfiles")).unwrap();
+                Ok(())
+            });
+
         // umount — just succeed
         mock.expect_umount().times(1).returning(|_| Ok(()));
 
@@ -894,6 +1123,7 @@ mod tests {
             passphrase: "test-passphrase-123".parse().unwrap(),
             skip_preseed: true,
             kdub_binary_path: binary_path,
+            quiet: true,
         };
 
         let result = create_persistent_storage(&mock, &opts);
@@ -935,6 +1165,16 @@ mod tests {
         // mount succeeds
         mock.expect_mount().returning(|_, _| Ok(()));
 
+        // setup_persistence_layout succeeds (creates dirs that populate needs)
+        mock.expect_setup_persistence_layout()
+            .times(1)
+            .returning(|mount_point| {
+                // Create dirs that populate_persistence expects
+                fs::create_dir_all(mount_point.join("gnupg")).unwrap();
+                fs::create_dir_all(mount_point.join("dotfiles")).unwrap();
+                Ok(())
+            });
+
         // umount should still be called during cleanup
         mock.expect_umount().times(1).returning(|_| Ok(()));
 
@@ -949,6 +1189,7 @@ mod tests {
             passphrase: "test-passphrase-123".parse().unwrap(),
             skip_preseed: false,
             kdub_binary_path: binary_path, // does not exist — will cause populate to fail
+            quiet: true,
         };
 
         let result = create_persistent_storage(&mock, &opts);
@@ -976,12 +1217,16 @@ mod tests {
         mock.expect_command_exists()
             .with(predicate::eq("sgdisk"))
             .returning(|_| true);
+        mock.expect_command_exists()
+            .with(predicate::eq("fatresize"))
+            .returning(|_| true);
 
         let opts = PersistOptions {
             device: PathBuf::from("/dev/sdb"),
             passphrase: "test-passphrase-123".parse().unwrap(),
             skip_preseed: false,
             kdub_binary_path: binary_path,
+            quiet: true,
         };
 
         let result = create_persistent_storage(&mock, &opts);
@@ -1014,6 +1259,7 @@ mod tests {
             passphrase: "test-passphrase-123".parse().unwrap(),
             skip_preseed: true,
             kdub_binary_path: binary_path,
+            quiet: true,
         };
 
         let result = create_persistent_storage(&mock, &opts);
@@ -1050,6 +1296,7 @@ mod tests {
             passphrase: "test-passphrase-123".parse().unwrap(),
             skip_preseed: true,
             kdub_binary_path: binary_path,
+            quiet: true,
         };
 
         let result = create_persistent_storage(&mock, &opts);
@@ -1098,6 +1345,7 @@ mod tests {
             passphrase: "test-passphrase-123".parse().unwrap(),
             skip_preseed: true,
             kdub_binary_path: binary_path,
+            quiet: true,
         };
 
         let result = create_persistent_storage(&mock, &opts);
@@ -1153,6 +1401,7 @@ mod tests {
             passphrase: "test-passphrase-123".parse().unwrap(),
             skip_preseed: true,
             kdub_binary_path: binary_path,
+            quiet: true,
         };
 
         let result = create_persistent_storage(&mock, &opts);
@@ -1161,6 +1410,60 @@ mod tests {
         assert!(
             err.contains("mount failed"),
             "error should propagate mount failure: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_setup_layout_failure_still_closes_luks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary_path = tmp.path().join("kdub");
+        fs::write(&binary_path, b"fake").unwrap();
+
+        let partition = PathBuf::from("/dev/sdb2");
+        let mapper_device = PathBuf::from(format!("/dev/mapper/{TAILS_LUKS_MAPPER_NAME}"));
+
+        let mut mock = MockTailsSystemDeps::new();
+        mock.expect_command_exists().returning(|_| true);
+
+        let partition_clone = partition.clone();
+        mock.expect_create_partition()
+            .returning(move |_| Ok(partition_clone.clone()));
+
+        mock.expect_luks_format().returning(|_, _| Ok(()));
+
+        let mapper_clone = mapper_device.clone();
+        mock.expect_luks_open()
+            .returning(move |_, _, _| Ok(mapper_clone.clone()));
+
+        mock.expect_mkfs_ext4().returning(|_, _| Ok(()));
+
+        mock.expect_mount().returning(|_, _| Ok(()));
+
+        // setup_persistence_layout fails — early return before populate/umount
+        mock.expect_setup_persistence_layout()
+            .returning(|_| Err(KdubError::TailsPersist("layout setup failed".into())));
+
+        // luks_close MUST be called even though setup_persistence_layout failed
+        mock.expect_luks_close()
+            .with(predicate::eq(TAILS_LUKS_MAPPER_NAME))
+            .times(1)
+            .returning(|_| Ok(()));
+
+        let opts = PersistOptions {
+            device: PathBuf::from("/dev/sdb"),
+            passphrase: "test-passphrase-123".parse().unwrap(),
+            skip_preseed: true,
+            kdub_binary_path: binary_path,
+            quiet: true,
+        };
+
+        let result = create_persistent_storage(&mock, &opts);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("layout setup failed"),
+            "error should propagate layout setup failure: {err}"
         );
     }
 }

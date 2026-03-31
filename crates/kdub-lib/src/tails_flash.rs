@@ -7,9 +7,10 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde::Serialize;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::defaults;
 use crate::error::KdubError;
@@ -28,8 +29,12 @@ pub struct BlockDevice {
     pub size_bytes: u64,
     /// Whether the device is removable/hotplug.
     pub removable: bool,
-    /// Mount points of any partitions (empty if unmounted).
+    /// Mount points of any child filesystems (empty if unmounted).
     pub mount_points: Vec<String>,
+    /// Ordered teardown commands to unmount all filesystems on this device.
+    /// Commands are in the correct order: unmount first, then close LUKS.
+    #[serde(skip)]
+    pub unmount_commands: Vec<String>,
 }
 
 /// Abstracts block device operations for testability.
@@ -72,11 +77,47 @@ impl BlockDeviceOps for LinuxBlockDeviceOps {
     }
 }
 
+/// Recursively collect mount points and teardown commands from a device tree.
+///
+/// Walks the full lsblk JSON tree to find mount points at any depth,
+/// including nested structures like partition → LUKS → filesystem mount.
+/// Teardown commands are generated in the correct order: unmount filesystems
+/// first (deepest first), then close LUKS/crypt containers.
+fn collect_mount_info(
+    node: &serde_json::Value,
+    mount_points: &mut Vec<String>,
+    unmount_commands: &mut Vec<String>,
+) {
+    // Recurse into children first (depth-first: inner mounts before outer closes).
+    if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+        for child in children {
+            collect_mount_info(child, mount_points, unmount_commands);
+        }
+    }
+
+    let name = node.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let dev_type = node.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Collect mount point and generate umount command.
+    if let Some(mp) = node.get("mountpoint").and_then(|v| v.as_str())
+        && !mp.is_empty()
+        && !mount_points.contains(&mp.to_string())
+    {
+        mount_points.push(mp.to_string());
+        unmount_commands.push(format!("sudo umount {mp}"));
+    }
+
+    // Generate cryptsetup close for LUKS containers (after their mounts are handled).
+    if dev_type == "crypt" && !name.is_empty() {
+        unmount_commands.push(format!("sudo cryptsetup close {name}"));
+    }
+}
+
 /// Parse lsblk JSON output into a list of removable block devices.
 ///
 /// Filters for whole disks (`TYPE == "disk"`) that are hotplug-removable
 /// (`HOTPLUG == true` or `"1"`) and meet the minimum size requirement.
-/// Mount points are collected from child partitions.
+/// Mount points are collected recursively from the full device tree.
 pub fn parse_lsblk_json(json: &str) -> Result<Vec<BlockDevice>, KdubError> {
     let root: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| KdubError::TailsFlash(format!("invalid lsblk JSON: {e}")))?;
@@ -125,25 +166,11 @@ pub fn parse_lsblk_json(json: &str) -> Result<Vec<BlockDevice>, KdubError> {
             continue;
         }
 
-        // Collect mount points from child partitions.
+        // Collect mount points and teardown commands recursively.
+        // This catches nested structures like partition → LUKS → mount.
         let mut mount_points = Vec::new();
-        if let Some(children) = dev.get("children").and_then(|v| v.as_array()) {
-            for child in children {
-                if let Some(mp) = child.get("mountpoint").and_then(|v| v.as_str())
-                    && !mp.is_empty()
-                {
-                    mount_points.push(mp.to_string());
-                }
-            }
-        }
-
-        // Also check the disk's own mountpoint (rare but possible).
-        if let Some(mp) = dev.get("mountpoint").and_then(|v| v.as_str())
-            && !mp.is_empty()
-            && !mount_points.contains(&mp.to_string())
-        {
-            mount_points.push(mp.to_string());
-        }
+        let mut unmount_commands = Vec::new();
+        collect_mount_info(dev, &mut mount_points, &mut unmount_commands);
 
         devices.push(BlockDevice {
             path: PathBuf::from(format!("/dev/{name}")),
@@ -151,6 +178,7 @@ pub fn parse_lsblk_json(json: &str) -> Result<Vec<BlockDevice>, KdubError> {
             size_bytes,
             removable: true,
             mount_points,
+            unmount_commands,
         });
     }
 
@@ -309,12 +337,18 @@ pub fn parse_diskutil_info(data: &[u8]) -> Result<BlockDevice, KdubError> {
         mount_points.push(mp.to_string());
     }
 
+    let unmount_commands = mount_points
+        .iter()
+        .map(|mp| format!("sudo umount {mp}"))
+        .collect();
+
     Ok(BlockDevice {
         path: PathBuf::from(device_node),
         model,
         size_bytes,
         removable,
         mount_points,
+        unmount_commands,
     })
 }
 
@@ -331,10 +365,20 @@ pub fn validate_flash_target(device: &BlockDevice) -> Result<(), KdubError> {
         )));
     }
     if !device.mount_points.is_empty() {
+        let cmds = if device.unmount_commands.is_empty() {
+            device
+                .mount_points
+                .iter()
+                .map(|mp| format!("  sudo umount {mp}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            format!("  {}", device.unmount_commands.join("\n  "))
+        };
         return Err(KdubError::TailsFlash(format!(
-            "{} has mounted partitions: {}",
+            "{} has mounted filesystems. Run these commands first:\n\n{}",
             device.path.display(),
-            device.mount_points.join(", ")
+            cmds
         )));
     }
     if device.size_bytes < defaults::TAILS_MIN_USB_SIZE_BYTES {
@@ -347,23 +391,51 @@ pub fn validate_flash_target(device: &BlockDevice) -> Result<(), KdubError> {
     Ok(())
 }
 
+/// Relocate the GPT backup header to the end of the device.
+///
+/// After writing a disk image via `dd`, the GPT backup header is positioned
+/// at the end of the *image*, not the end of the *device*. This leaves the
+/// remaining space unrecognized by partitioning tools. Running `sgdisk -e`
+/// moves the backup header to the correct location so the full device
+/// capacity is available for new partitions (e.g., persistent storage).
+///
+/// # Errors
+///
+/// Returns `KdubError::TailsFlash` if `sgdisk` fails.
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn fix_gpt_backup_header(device_path: &Path) -> Result<(), KdubError> {
+    debug!(
+        ?device_path,
+        "relocating GPT backup header to end of device"
+    );
+    let output = Command::new("sudo")
+        .args(["sgdisk", "-e"])
+        .arg(device_path)
+        .output()
+        .map_err(|e| KdubError::TailsFlash(format!("failed to run sgdisk -e: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(KdubError::TailsFlash(format!(
+            "sgdisk -e (fix GPT backup header) failed: {stderr}"
+        )));
+    }
+
+    debug!("GPT backup header relocated");
+    Ok(())
+}
+
 /// Write an ISO image to a block device with progress reporting.
 ///
 /// Opens the image for reading and the device for raw writing, then copies
 /// data in 1 MB chunks. On macOS, converts `/dev/diskN` to `/dev/rdiskN`
-/// for raw device speed. Calls `fsync` on completion to flush all data.
-///
-/// # Arguments
-///
-/// * `image_path` - Path to the source ISO/IMG file.
-/// * `device_path` - Path to the target block device (e.g. `/dev/sdb`).
-/// * `progress_callback` - Optional callback invoked after each chunk with
-///   `(bytes_written, total_size)`.
+/// for raw device speed. Tries a direct write first; if permission is denied,
+/// falls back to `sudo dd` which prompts for the user's password.
 ///
 /// # Errors
 ///
 /// Returns `KdubError::TailsFlash` if the image or device cannot be opened,
-/// a write fails, or permissions are insufficient (with a clear EPERM message).
+/// a write fails, or permissions are insufficient.
 pub fn write_image_to_device(
     image_path: &Path,
     device_path: &Path,
@@ -372,9 +444,6 @@ pub fn write_image_to_device(
     let total_size = fs::metadata(image_path)
         .map_err(|e| KdubError::TailsFlash(format!("cannot read image file: {e}")))?
         .len();
-
-    let mut reader = fs::File::open(image_path)
-        .map_err(|e| KdubError::TailsFlash(format!("cannot open image file: {e}")))?;
 
     // On macOS, use the raw device (/dev/rdiskN) for better write performance.
     let actual_device = resolve_raw_device(device_path);
@@ -385,9 +454,33 @@ pub fn write_image_to_device(
         "starting image write"
     );
 
-    let mut writer = open_device_for_writing(&actual_device)?;
+    // Try direct write first (works if already root or has capabilities).
+    // Fall back to sudo dd if permission denied.
+    match open_device_for_writing(&actual_device) {
+        Ok(writer) => {
+            write_image_direct(image_path, writer, total_size, progress_callback)?;
+        }
+        Err(ref e) if e.to_string().contains("permission denied") => {
+            info!("escalating to sudo for device write");
+            write_image_sudo(image_path, &actual_device, total_size, progress_callback)?;
+        }
+        Err(e) => return Err(e),
+    }
 
-    // 1 MB chunks for efficient block device I/O.
+    debug!(total_size, "image write complete");
+    Ok(())
+}
+
+/// Write image data directly to an already-opened device file.
+fn write_image_direct(
+    image_path: &Path,
+    mut writer: fs::File,
+    total_size: u64,
+    progress_callback: Option<&dyn Fn(u64, u64)>,
+) -> Result<(), KdubError> {
+    let mut reader = fs::File::open(image_path)
+        .map_err(|e| KdubError::TailsFlash(format!("cannot open image file: {e}")))?;
+
     const CHUNK_SIZE: usize = 1024 * 1024;
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut bytes_written: u64 = 0;
@@ -400,22 +493,16 @@ pub fn write_image_to_device(
             break;
         }
 
-        writer.write_all(&buf[..n]).map_err(|e| match e.kind() {
-            std::io::ErrorKind::PermissionDenied => KdubError::TailsFlash(format!(
-                "permission denied writing to {}. Try running with sudo.",
-                actual_device.display()
-            )),
-            _ => KdubError::TailsFlash(format!("write error on {}: {e}", actual_device.display())),
-        })?;
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| KdubError::TailsFlash(format!("write error: {e}")))?;
 
         bytes_written += n as u64;
-
         if let Some(cb) = &progress_callback {
             cb(bytes_written, total_size);
         }
     }
 
-    // Flush all data to the device.
     writer
         .flush()
         .map_err(|e| KdubError::TailsFlash(format!("flush error: {e}")))?;
@@ -423,7 +510,43 @@ pub fn write_image_to_device(
         .sync_all()
         .map_err(|e| KdubError::TailsFlash(format!("fsync error: {e}")))?;
 
-    debug!(bytes_written, "image write complete");
+    Ok(())
+}
+
+/// Write image to device via `sudo dd`, escalating privileges only for the write.
+///
+/// All stdio is inherited so `sudo` can prompt for a password and `dd`'s
+/// `status=progress` output goes directly to the user's terminal.
+/// The custom progress callback is not used in this path — dd's native
+/// progress display is shown instead.
+fn write_image_sudo(
+    image_path: &Path,
+    device_path: &Path,
+    _total_size: u64,
+    _progress_callback: Option<&dyn Fn(u64, u64)>,
+) -> Result<(), KdubError> {
+    let status = Command::new("sudo")
+        .args([
+            "dd",
+            &format!("if={}", image_path.display()),
+            &format!("of={}", device_path.display()),
+            "bs=1M",
+            "conv=fsync",
+            "status=progress",
+        ])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| KdubError::TailsFlash(format!("failed to run sudo dd: {e}")))?;
+
+    if !status.success() {
+        return Err(KdubError::TailsFlash(format!(
+            "sudo dd failed with exit code {}",
+            status.code().unwrap_or(-1)
+        )));
+    }
+
     Ok(())
 }
 
@@ -654,6 +777,163 @@ mod tests {
         assert!(devices.is_empty());
     }
 
+    #[test]
+    fn parse_lsblk_nested_luks_mount_detected() {
+        // Real-world scenario: Tails USB with encrypted persistence auto-mounted.
+        // sdd → sdd1 (Tails boot, unmounted) → sdd2 → luks-xxx → /media/bram/TailsData
+        let json = r#"{
+            "blockdevices": [
+                {
+                    "name": "sdd",
+                    "size": 128320801792,
+                    "model": "Flash Drive",
+                    "hotplug": true,
+                    "mountpoint": null,
+                    "type": "disk",
+                    "children": [
+                        {
+                            "name": "sdd1",
+                            "size": 8587951616,
+                            "model": null,
+                            "hotplug": true,
+                            "mountpoint": null,
+                            "type": "part"
+                        },
+                        {
+                            "name": "sdd2",
+                            "size": 119730601984,
+                            "model": null,
+                            "hotplug": true,
+                            "mountpoint": null,
+                            "type": "part",
+                            "children": [
+                                {
+                                    "name": "luks-d0844220-33fb-405c-a323-5213b5957f05",
+                                    "size": 119713824768,
+                                    "model": null,
+                                    "hotplug": false,
+                                    "mountpoint": "/media/bram/TailsData",
+                                    "type": "crypt"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let devices = parse_lsblk_json(json).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].mount_points, vec!["/media/bram/TailsData"]);
+        // Unmount commands must be in correct order: umount first, then close LUKS.
+        assert_eq!(
+            devices[0].unmount_commands,
+            vec![
+                "sudo umount /media/bram/TailsData",
+                "sudo cryptsetup close luks-d0844220-33fb-405c-a323-5213b5957f05",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_lsblk_deeply_nested_mounts_detected() {
+        // Pathological case: disk → part → LUKS → LVM → mount
+        let json = r#"{
+            "blockdevices": [
+                {
+                    "name": "sde",
+                    "size": 64000000000,
+                    "model": "Deep USB",
+                    "hotplug": true,
+                    "mountpoint": null,
+                    "type": "disk",
+                    "children": [
+                        {
+                            "name": "sde1",
+                            "size": 64000000000,
+                            "mountpoint": null,
+                            "type": "part",
+                            "children": [
+                                {
+                                    "name": "luks-abc",
+                                    "size": 64000000000,
+                                    "mountpoint": null,
+                                    "type": "crypt",
+                                    "children": [
+                                        {
+                                            "name": "vg-data",
+                                            "size": 64000000000,
+                                            "mountpoint": "/mnt/data",
+                                            "type": "lvm"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let devices = parse_lsblk_json(json).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].mount_points, vec!["/mnt/data"]);
+        // LVM mount is unmounted, then LUKS container is closed.
+        assert_eq!(
+            devices[0].unmount_commands,
+            vec!["sudo umount /mnt/data", "sudo cryptsetup close luks-abc",]
+        );
+    }
+
+    #[test]
+    fn parse_lsblk_multiple_nested_mounts_all_collected() {
+        // Multiple partitions with mounts at different nesting levels
+        let json = r#"{
+            "blockdevices": [
+                {
+                    "name": "sdf",
+                    "size": 64000000000,
+                    "model": "Multi USB",
+                    "hotplug": true,
+                    "mountpoint": null,
+                    "type": "disk",
+                    "children": [
+                        {
+                            "name": "sdf1",
+                            "size": 8000000000,
+                            "mountpoint": "/mnt/boot",
+                            "type": "part"
+                        },
+                        {
+                            "name": "sdf2",
+                            "size": 56000000000,
+                            "mountpoint": null,
+                            "type": "part",
+                            "children": [
+                                {
+                                    "name": "luks-xyz",
+                                    "size": 56000000000,
+                                    "mountpoint": "/mnt/encrypted",
+                                    "type": "crypt"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let devices = parse_lsblk_json(json).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].mount_points, vec!["/mnt/boot", "/mnt/encrypted"]);
+        // Direct partition mount + LUKS mount → umount both, close the LUKS.
+        assert_eq!(
+            devices[0].unmount_commands,
+            vec![
+                "sudo umount /mnt/boot",
+                "sudo umount /mnt/encrypted",
+                "sudo cryptsetup close luks-xyz",
+            ]
+        );
+    }
+
     // ── diskutil plist parsing ──────────────────────────────────────
 
     #[test]
@@ -855,6 +1135,7 @@ mod tests {
             size_bytes: 16_000_000_000,
             removable: true,
             mount_points: vec![],
+            unmount_commands: vec![],
         };
         assert!(validate_flash_target(&dev).is_ok());
     }
@@ -867,6 +1148,7 @@ mod tests {
             size_bytes: 500_000_000_000,
             removable: false,
             mount_points: vec![],
+            unmount_commands: vec![],
         };
         let err = validate_flash_target(&dev).unwrap_err();
         let msg = err.to_string();
@@ -882,10 +1164,18 @@ mod tests {
             size_bytes: 32_000_000_000,
             removable: true,
             mount_points: vec!["/mnt/usb".into(), "/media/user/drive".into()],
+            unmount_commands: vec![
+                "sudo umount /mnt/usb".into(),
+                "sudo umount /media/user/drive".into(),
+            ],
         };
         let err = validate_flash_target(&dev).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("mounted partitions"), "got: {msg}");
+        assert!(msg.contains("mounted filesystems"), "got: {msg}");
+        assert!(
+            msg.contains("sudo umount"),
+            "should show umount command, got: {msg}"
+        );
         assert!(msg.contains("/mnt/usb"), "got: {msg}");
         assert!(msg.contains("/media/user/drive"), "got: {msg}");
     }
@@ -898,6 +1188,7 @@ mod tests {
             size_bytes: 4_000_000_000,
             removable: true,
             mount_points: vec![],
+            unmount_commands: vec![],
         };
         let err = validate_flash_target(&dev).unwrap_err();
         let msg = err.to_string();
@@ -914,6 +1205,7 @@ mod tests {
             size_bytes: defaults::TAILS_MIN_USB_SIZE_BYTES,
             removable: true,
             mount_points: vec![],
+            unmount_commands: vec![],
         };
         assert!(validate_flash_target(&dev).is_ok());
     }
@@ -928,11 +1220,34 @@ mod tests {
             size_bytes: 1_000_000_000,
             removable: false,
             mount_points: vec!["/".into()],
+            unmount_commands: vec!["sudo umount /".into()],
         };
         let err = validate_flash_target(&dev).unwrap_err();
         assert!(
             err.to_string().contains("not a removable device"),
             "should fail on removable check first"
+        );
+    }
+
+    #[test]
+    fn validate_flash_target_mounted_empty_unmount_commands_falls_back_to_mount_points() {
+        // When unmount_commands is empty but mount_points is populated,
+        // validate_flash_target should generate fallback umount commands from mount_points.
+        let dev = BlockDevice {
+            path: PathBuf::from("/dev/sdb"),
+            model: "Flash Drive".into(),
+            size_bytes: 16_000_000_000,
+            removable: true,
+            mount_points: vec!["/mnt/tails".into()],
+            unmount_commands: vec![], // empty — triggers fallback path
+        };
+        let err = validate_flash_target(&dev).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mounted filesystems"), "got: {msg}");
+        // Fallback generates "sudo umount <mountpoint>" from mount_points.
+        assert!(
+            msg.contains("sudo umount /mnt/tails"),
+            "expected fallback umount command from mount_points, got: {msg}"
         );
     }
 
@@ -953,6 +1268,7 @@ mod tests {
                 size_bytes: 14_900_000_000,
                 removable: true,
                 mount_points: vec![],
+                unmount_commands: vec![],
             },
             BlockDevice {
                 path: PathBuf::from("/dev/sdc"),
@@ -960,6 +1276,7 @@ mod tests {
                 size_bytes: 29_800_000_000,
                 removable: true,
                 mount_points: vec!["/mnt/usb".into()],
+                unmount_commands: vec!["sudo umount /mnt/usb".into()],
             },
         ];
 
@@ -975,6 +1292,7 @@ mod tests {
             size_bytes: 16_000_000_000,
             removable: true,
             mount_points: vec![],
+            unmount_commands: vec![],
         }];
 
         let output = format_device_table(&devices);
@@ -993,6 +1311,7 @@ mod tests {
             size_bytes: 32_000_000_000,
             removable: true,
             mount_points: vec!["/mnt/a".into(), "/mnt/b".into()],
+            unmount_commands: vec!["sudo umount /mnt/a".into(), "sudo umount /mnt/b".into()],
         }];
 
         let output = format_device_table(&devices);
@@ -1104,6 +1423,7 @@ mod tests {
             size_bytes: 16_000_000_000,
             removable: true,
             mount_points: vec!["/mnt/usb".into()],
+            unmount_commands: vec!["sudo umount /mnt/usb".into()],
         };
         let cloned = dev.clone();
         assert_eq!(cloned.path, dev.path);
@@ -1121,6 +1441,7 @@ mod tests {
             size_bytes: 16_000_000_000,
             removable: true,
             mount_points: vec![],
+            unmount_commands: vec![],
         };
         let debug = format!("{dev:?}");
         assert!(debug.contains("BlockDevice"));
@@ -1135,6 +1456,7 @@ mod tests {
             size_bytes: 16_000_000_000,
             removable: true,
             mount_points: vec![],
+            unmount_commands: vec![],
         };
         let json = serde_json::to_string(&dev).unwrap();
         assert!(json.contains("Flash Drive"));
@@ -1153,6 +1475,7 @@ mod tests {
                 size_bytes: 16_000_000_000,
                 removable: true,
                 mount_points: vec![],
+                unmount_commands: vec![],
             }])
         });
 

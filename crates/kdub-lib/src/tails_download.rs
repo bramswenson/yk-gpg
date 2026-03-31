@@ -199,11 +199,27 @@ pub fn verify_iso_signature(
     let (sig, _) = DetachedSignature::from_armor_single(std::io::Cursor::new(sig_bytes))
         .map_err(|e| KdubError::TailsDownload(format!("failed to parse signature: {e}")))?;
 
-    // Verify the signature against the data.
-    sig.verify(&public_key, iso_bytes)
-        .map_err(|e| KdubError::TailsDownload(format!("signature verification failed: {e}")))?;
+    // Try verification against the primary key first, then each subkey.
+    // Tails signs ISOs with a signing subkey, not the primary key. rPGP's
+    // VerifyingKey impl for SignedPublicKey only checks the primary key,
+    // so we must also try each subkey explicitly.
+    let mut last_err = sig.verify(&public_key, iso_bytes).err();
 
-    Ok(())
+    if last_err.is_some() {
+        for subkey in &public_key.public_subkeys {
+            match sig.verify(subkey, iso_bytes) {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = Some(e),
+            }
+        }
+    } else {
+        return Ok(());
+    }
+
+    Err(KdubError::TailsDownload(format!(
+        "signature verification failed: {}",
+        last_err.expect("at least one verification attempt was made")
+    )))
 }
 
 /// Resolve the cache directory for Tails downloads.
@@ -827,9 +843,197 @@ mod tests {
     }
 
     #[test]
+    fn verify_signature_wrong_data_with_subkeys() {
+        // The embedded Tails key has subkeys. Verification against wrong data
+        // should fail for the primary key AND all subkeys, returning an error.
+        // This exercises the subkey fallback loop's error path.
+        let key_bytes = defaults::TAILS_SIGNING_KEY;
+        let sig = include_bytes!("../tests/fixtures/test_iso.bin.sig");
+        let wrong_data = b"this data was not signed by any Tails key";
+
+        let result = verify_iso_signature(wrong_data, sig, key_bytes, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("signature verification failed"),
+            "should report verification failure after trying all subkeys, got: {err}"
+        );
+    }
+
+    /// Verify the embedded production Tails signing key parses correctly,
+    /// has the expected primary fingerprint, and contains signing-capable
+    /// subkeys. This catches key truncation or bad minimization that would
+    /// break ISO verification at runtime.
+    #[test]
+    fn embedded_tails_signing_key_has_signing_subkeys() {
+        use pgp::types::KeyDetails;
+
+        let key_bytes = defaults::TAILS_SIGNING_KEY;
+        let (public_key, _) = SignedPublicKey::from_armor_single(std::io::Cursor::new(key_bytes))
+            .expect("embedded Tails signing key should parse");
+
+        // Primary key fingerprint matches the hardcoded constant.
+        let fp = hex::encode_upper(public_key.fingerprint().as_bytes());
+        assert_eq!(
+            fp,
+            defaults::TAILS_SIGNING_KEY_FINGERPRINT,
+            "embedded key fingerprint should match TAILS_SIGNING_KEY_FINGERPRINT"
+        );
+
+        // Key must have subkeys. A key with 0 subkeys means it was
+        // over-minimized and can't verify ISO signatures (which are
+        // made by subkeys, not the primary key).
+        assert!(
+            !public_key.public_subkeys.is_empty(),
+            "embedded key must have subkeys for signature verification; \
+             got 0 subkeys — key may have been over-minimized"
+        );
+
+        // The subkey that signs current Tails releases (as of 2026-03).
+        // If Tails rotates to a new subkey, update this constant.
+        // The subkeys-exist assertion above still catches truncation regardless.
+        let current_signing_subkey_fp = "A013A001BEDF1AFADF0B0B3AE26AE7BE8FA5B8D1";
+        let subkey_fps: Vec<String> = public_key
+            .public_subkeys
+            .iter()
+            .map(|sk| hex::encode_upper(sk.fingerprint().as_bytes()))
+            .collect();
+        assert!(
+            subkey_fps.iter().any(|f| f == current_signing_subkey_fp),
+            "embedded key should contain current signing subkey {current_signing_subkey_fp}; \
+             found subkeys: {subkey_fps:?}"
+        );
+    }
+
+    #[test]
+    fn parse_latest_json_missing_version() {
+        let json = r#"{
+            "installations": [{
+                "installation-paths": [{
+                    "target-files": [{"sha256": "abc", "size": 100, "url": "https://example.com/file.img"}],
+                    "type": "img"
+                }]
+            }]
+        }"#;
+        let result = parse_latest_json(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("version"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_latest_json_missing_target_files() {
+        let json = r#"{
+            "installations": [{
+                "version": "7.5",
+                "installation-paths": [{
+                    "type": "img"
+                }]
+            }]
+        }"#;
+        let result = parse_latest_json(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("target-files"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_latest_json_missing_url() {
+        let json = r#"{
+            "installations": [{
+                "version": "7.5",
+                "installation-paths": [{
+                    "target-files": [{"sha256": "abc", "size": 100}],
+                    "type": "img"
+                }]
+            }]
+        }"#;
+        let result = parse_latest_json(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("url"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_latest_json_missing_sha256() {
+        let json = r#"{
+            "installations": [{
+                "version": "7.5",
+                "installation-paths": [{
+                    "target-files": [{"url": "https://example.com/tails.img", "size": 100}],
+                    "type": "img"
+                }]
+            }]
+        }"#;
+        let result = parse_latest_json(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("sha256"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_latest_json_missing_size() {
+        let json = r#"{
+            "installations": [{
+                "version": "7.5",
+                "installation-paths": [{
+                    "target-files": [{"url": "https://example.com/tails.img", "sha256": "abc"}],
+                    "type": "img"
+                }]
+            }]
+        }"#;
+        let result = parse_latest_json(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("size"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_latest_json_missing_installation_paths() {
+        let json = r#"{
+            "installations": [{
+                "version": "7.5"
+            }]
+        }"#;
+        let result = parse_latest_json(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("installation-paths"), "got: {err}");
+    }
+
+    #[test]
     fn find_cached_iso_none_when_empty() {
         let dir = tempfile::tempdir().unwrap();
         let result = find_cached_iso(dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_cached_iso_finds_matching_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let img_path = dir.path().join("tails-amd64-7.5.img");
+        fs::write(&img_path, b"fake iso").unwrap();
+
+        let result = find_cached_iso(dir.path());
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), img_path);
+    }
+
+    #[test]
+    fn find_cached_iso_ignores_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.txt"), b"not an iso").unwrap();
+        fs::write(dir.path().join("tails-amd64-7.5.img.part"), b"partial").unwrap();
+
+        let result = find_cached_iso(dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_cached_iso_nonexistent_dir_returns_none() {
+        let result = find_cached_iso(std::path::Path::new(
+            "/nonexistent/path/that/does/not/exist",
+        ));
         assert!(result.is_none());
     }
 

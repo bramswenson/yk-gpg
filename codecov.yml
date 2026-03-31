@@ -17,3 +17,5 @@ ignore:
   - "crates/kdub/src/commands/card.rs"
   # Self-update — GitHub API + self_update lib + binary replacement, core logic tested
   - "crates/kdub/src/updater.rs"
+  # CLI tails handlers — interactive prompts, sudo escalation, progress bars
+  - "crates/kdub/src/commands/tails.rs"
