@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-kdub-lib = { path = "../kdub-lib", version = "0.1.1" }
+kdub-lib = { path = "../kdub-lib", version = "0.1.2" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 color-eyre = "0.6"
